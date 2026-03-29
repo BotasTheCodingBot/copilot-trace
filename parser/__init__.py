@@ -1,0 +1,1 @@
+# copilot-trace parser package

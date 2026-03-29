@@ -1,0 +1,4 @@
+# Local development / automation dependencies.
+# `-e .` installs the package + CLI entrypoint from pyproject.toml.
+-e .
+build>=1.2,<2

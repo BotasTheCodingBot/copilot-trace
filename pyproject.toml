@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "copilot-trace"
+version = "0.1.0"
+description = "CLI, parser, API, and review UI for Copilot session traces"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "msgpack",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+]
+keywords = ["copilot", "traces", "agenttrace", "sqlite", "observability"]
+
+[project.scripts]
+copilot-trace = "parser.cli:main"
+
+[tool.setuptools]
+packages = ["parser"]
