@@ -26,11 +26,12 @@ if [[ -d "$VENV_DIR/Scripts" ]]; then
   VENV_BIN="$VENV_DIR/Scripts"
 fi
 
-if [[ $# -gt 0 ]]; then
-  INPUT=""
-else
-  INPUT=""
+PYTHON_EXEC="$VENV_BIN/python"
+if [[ -f "$VENV_BIN/python.exe" ]]; then
+  PYTHON_EXEC="$VENV_BIN/python.exe"
 fi
+
+INPUT=""
 DB="$ROOT_DIR/out/traces.db"
 JSON="$ROOT_DIR/out/traces.json"
 CONFIG="$ROOT_DIR/out/copilot-trace-config.json"
@@ -63,7 +64,6 @@ while [[ $# -gt 0 ]]; do
       exit 2
       ;;
   esac
-
 done
 
 if [[ -z "$INPUT" ]]; then
@@ -78,9 +78,4 @@ if [[ "$ROTATE_DB" == "true" ]]; then
   ARGS+=(--rotate-db)
 fi
 
-PYTHON_EXEC="$VENV_BIN/python"
-if [[ -f "$VENV_BIN/python.exe" ]]; then
-  PYTHON_EXEC="$VENV_BIN/python.exe"
-fi
-
-exec "$PYTHON_EXEC" -m copilot_trace "${ARGS[@]}"
+PYTHONPATH="$ROOT_DIR" "$PYTHON_EXEC" -m copilot_trace "${ARGS[@]}"
