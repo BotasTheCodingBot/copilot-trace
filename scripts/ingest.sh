@@ -31,6 +31,22 @@ if [[ -f "$VENV_BIN/python.exe" ]]; then
   PYTHON_EXEC="$VENV_BIN/python.exe"
 fi
 
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN=python
+  elif command -v py >/dev/null 2>&1; then
+    PYTHON_BIN="py -3"
+  else
+    echo "python interpreter not found" >&2
+    exit 1
+  fi
+fi
+
+"$PYTHON_BIN" -m venv "$VENV_DIR"
+"$PYTHON_EXEC" -m pip install --upgrade pip
+"$PYTHON_EXEC" -m pip install -e "$ROOT_DIR"
+"$PYTHON_EXEC" -m pip install -r "$ROOT_DIR/requirements.txt"
+
 INPUT=""
 DB="$ROOT_DIR/out/traces.db"
 JSON="$ROOT_DIR/out/traces.json"
@@ -73,9 +89,9 @@ fi
 
 mkdir -p "$(dirname "$DB")" "$(dirname "$JSON")" "$(dirname "$CONFIG")"
 
-ARGS=(trace "$INPUT" --db "$DB" --json "$JSON" --config "$CONFIG")
+ARGS+=(trace "$INPUT" --db "$DB" --json "$JSON" --config "$CONFIG")
 if [[ "$ROTATE_DB" == "true" ]]; then
   ARGS+=(--rotate-db)
 fi
 
-PYTHONPATH="$ROOT_DIR" "$PYTHON_EXEC" -m copilot_trace "${ARGS[@]}"
+PYTHONPATH="${PYTHONPATH:-}$ROOT_DIR" "$PYTHON_EXEC" -m parser.cli "${ARGS[@]}"
