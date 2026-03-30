@@ -21,6 +21,27 @@ if [[ "$(uname -s)" =~ MINGW ]] || [[ "$(uname -s)" =~ MSYS ]]; then
   VENV_DIR="$(convert_path "$VENV_DIR")"
 fi
 
+detect_python() {
+  if command -v "$1" >/dev/null 2>&1; then
+    echo "$1"
+    return
+  fi
+  return 1
+}
+
+if ! detect_python "$PYTHON_BIN" >/dev/null 2>&1; then
+  if detect_python python3 >/dev/null 2>&1; then
+    PYTHON_BIN=python3
+  elif detect_python python >/dev/null 2>&1; then
+    PYTHON_BIN=python
+  elif detect_python py >/dev/null 2>&1; then
+    PYTHON_BIN="py -3"
+  else
+    echo "python interpreter not found" >&2
+    exit 1
+  fi
+fi
+
 VENV_BIN="$VENV_DIR/bin"
 if [[ -d "$VENV_DIR/Scripts" ]]; then
   VENV_BIN="$VENV_DIR/Scripts"
