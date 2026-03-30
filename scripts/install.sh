@@ -5,9 +5,20 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-if command -v cygpath >/dev/null && [[ "$(uname -s)" == *MINGW* ]]; then
-  ROOT_DIR="$(cygpath -u "$ROOT_DIR")"
-  VENV_DIR="$(cygpath -u "$VENV_DIR")"
+convert_path() {
+  local path="$1"
+  if [[ "$path" =~ ^([A-Za-z]):\\(.*) ]]; then
+    local drive=${BASH_REMATCH[1],,}
+    local rest=${BASH_REMATCH[2]}
+    echo "/$drive/${rest//\\//}"
+  else
+    echo "$path"
+  fi
+}
+
+if [[ "$(uname -s)" =~ MINGW ]] || [[ "$(uname -s)" =~ MSYS ]]; then
+  ROOT_DIR="$(convert_path "$ROOT_DIR")"
+  VENV_DIR="$(convert_path "$VENV_DIR")"
 fi
 
 VENV_BIN="$VENV_DIR/bin"
