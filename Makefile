@@ -12,6 +12,7 @@ UI_PORT ?= 5173
 DB ?= out/traces.db
 JSON ?= out/traces.json
 INPUT ?=
+ROOT_DIR ?= $(CURDIR)
 
 .PHONY: help install install-python install-ui test test-python build build-python build-ui package run-api run-ui ingest clean
 
