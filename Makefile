@@ -29,7 +29,7 @@ help:
 install: install-python install-ui
 
 install-python:
-	./scripts/install.sh
+	bash "$(ROOT_DIR)/scripts/install.sh"
 
 install-ui:
 	cd $(UI_DIR) && $(NPM) ci
