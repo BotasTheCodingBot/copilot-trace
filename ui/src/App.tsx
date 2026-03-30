@@ -1,14 +1,9 @@
-import type { ReactNode } from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Box,
   Button,
   Chip,
-  CircularProgress,
-  Dialog,
-  DialogContent,
-  Divider,
   LinearProgress,
   List,
   ListItemButton,
@@ -17,226 +12,49 @@ import {
   Pagination,
   Paper,
   Stack,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
   TextField,
   Typography,
 } from '@mui/material'
-import AutoGraphRoundedIcon from '@mui/icons-material/AutoGraphRounded'
-import DashboardRoundedIcon from '@mui/icons-material/DashboardRounded'
-import DifferenceRoundedIcon from '@mui/icons-material/DifferenceRounded'
-import DownloadRoundedIcon from '@mui/icons-material/DownloadRounded'
-import OpenInFullRoundedIcon from '@mui/icons-material/OpenInFullRounded'
-import TimelineRoundedIcon from '@mui/icons-material/TimelineRounded'
-import TraceTree from './components/TraceTree'
-import JsonViewer from './components/JsonViewer'
-import { diffTraceObjects } from './components/traceTreeUtils'
+import {
+  API_BASE,
+  EVAL_PAGE_SIZE,
+  getCurrentPath,
+  getCurrentSearch,
+  hasWindow,
+  PAGE_META,
+  pageForPath,
+  pagePath,
+  SESSION_PAGE_SIZE,
+  SAMPLE_BUNDLE_URL,
+  TRACE_PAGE_SIZE,
+  type AppPage,
+} from './lib/appConfig'
+import {
+  EMPTY_SAMPLE_STATE,
+  enrichTraces,
+  PageLoadingState,
+  pct,
+  toSampleState,
+  toneForStatus,
+  type SampleState,
+} from './lib/appUtils'
 import type {
   Evaluation,
   EvaluationListResponse,
   EvaluationSessionSummary,
   SessionListResponse,
   Trace,
-  TraceBundle,
   TraceListResponse,
   TraceSessionSummary,
+  TraceBundle,
 } from './types'
 
-const API_BASE = ((import.meta as any).env?.VITE_API_BASE as string | undefined)?.replace(/\/$/, '') ?? 'http://127.0.0.1:8000'
-const SAMPLE_BUNDLE_URL = ((import.meta as any).env?.BASE_URL as string | undefined ?? '/').replace(/\/?$/, '/') + 'traces.sample.json'
-const SESSION_PAGE_SIZE = 8
-const TRACE_PAGE_SIZE = 25
-const EVAL_PAGE_SIZE = 50
-
-type AppPage = 'parser' | 'evaluation' | 'dashboard'
-
-type SampleState = {
-  traces: Trace[]
-  sessions: TraceSessionSummary[]
-  evaluations: Evaluation[]
-  evaluationSessions: EvaluationSessionSummary[]
-}
-
-const EMPTY_SAMPLE_STATE: SampleState = {
-  traces: [],
-  sessions: [],
-  evaluations: [],
-  evaluationSessions: [],
-}
-
-const PAGE_META: Array<{ key: AppPage; label: string; description: string; icon: typeof TimelineRoundedIcon; path: string }> = [
-  {
-    key: 'parser',
-    path: '/parser',
-    label: 'Parser overview',
-    description: 'Session picker, trace filters, pagination, and inspection of the live Copilot event stream.',
-    icon: TimelineRoundedIcon,
-  },
-  {
-    key: 'evaluation',
-    path: '/evaluation',
-    label: 'Evaluation',
-    description: 'Quality history, rubric detail, and recent assistant-turn scoring for the active session.',
-    icon: AutoGraphRoundedIcon,
-  },
-  {
-    key: 'dashboard',
-    path: '/dashboard',
-    label: 'Dashboard',
-    description: 'Operational readout for coverage, session health, and evaluation signals pulled from the API.',
-    icon: DashboardRoundedIcon,
-  },
-]
-
-const pageForPath = (hashOrPath: string): AppPage => {
-  const normalized = hashOrPath.startsWith('#') ? hashOrPath.slice(1) || '/parser' : hashOrPath
-  return PAGE_META.find((item) => item.path === normalized)?.key ?? 'parser'
-}
-const pagePath = (page: AppPage) => PAGE_META.find((item) => item.key === page)?.path ?? '/parser'
-
-const toneForType = (type: string) => {
-  switch (type) {
-    case 'USER_MESSAGE': return 'primary'
-    case 'ASSISTANT_MESSAGE': return 'success'
-    case 'TOOL_CALL': return 'warning'
-    case 'TOOL_RESULT': return 'secondary'
-    default: return 'default'
-  }
-}
-
-const toneForStatus = (status: string) => {
-  switch (status) {
-    case 'pass': return 'success'
-    case 'warn': return 'warning'
-    case 'fail': return 'error'
-    default: return 'default'
-  }
-}
-
-const pct = (value: number | undefined | null) => value == null ? '—' : `${Math.round(value * 100)}%`
-const safeText = (trace: Trace) => String(trace.text ?? trace.state ?? trace.description ?? trace.timestamp ?? '')
-const formatMetricLabel = (metric: string) => metric.replace(/_/g, ' ')
-const describeEvalStatus = (evaluation: Evaluation) => {
-  if (evaluation.status_explanation) return evaluation.status_explanation
-  const weakestMetric = Object.entries(evaluation.metrics).sort((a, b) => a[1] - b[1])[0]?.[0]
-  const weakestLabel = weakestMetric ? formatMetricLabel(weakestMetric) : 'unknown signal'
-  if (evaluation.status === 'pass') return `Scored ${pct(evaluation.score)}, so it passed the current rubric (pass ≥ 75%).`
-  if (evaluation.status === 'warn') return `Scored ${pct(evaluation.score)}, so it landed in review territory (warn ≥ 50%). Weakest signal: ${weakestLabel}.`
-  return `Scored ${pct(evaluation.score)}, so it failed the current rubric (< 50%). Weakest signal: ${weakestLabel}.`
-}
-
-const enrichTraces = (input: Trace[]): Trace[] => {
-  const grouped = new Map<string, Trace[]>()
-  input.forEach((trace) => {
-    const sessionId = trace.session_id ?? ''
-    grouped.set(sessionId, [...(grouped.get(sessionId) ?? []), trace])
-  })
-
-  const enriched: Trace[] = []
-  for (const [sessionId, traces] of grouped.entries()) {
-    const sorted = [...traces].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id))
-    const messageMap = new Map(sorted.filter((trace) => trace.message_id).map((trace) => [String(trace.message_id), trace.id]))
-    const toolMap = new Map(sorted.filter((trace) => trace.tool_call_id && trace.type === 'TOOL_CALL').map((trace) => [String(trace.tool_call_id), trace.id]))
-    sorted.forEach((trace, index) => {
-      let parentTraceId: string | null = trace.parent_trace_id ?? null
-      let parentReason: string | null = trace.parent_reason ?? null
-      if (!parentTraceId && trace.type === 'TOOL_CALL') {
-        parentTraceId = messageMap.get(String(trace.message_id ?? '')) ?? null
-        parentReason = parentTraceId ? 'message' : null
-      }
-      if (!parentTraceId && trace.type === 'TOOL_RESULT') {
-        parentTraceId = toolMap.get(String(trace.tool_call_id ?? '')) ?? null
-        parentReason = parentTraceId ? 'tool_call' : null
-      }
-      enriched.push({
-        ...trace,
-        sequence: trace.sequence ?? index + 1,
-        sequence_id: trace.sequence_id ?? `${sessionId}:${index + 1}`,
-        parent_trace_id: parentTraceId,
-        parent_reason: parentReason,
-      })
-    })
-  }
-  return enriched
-}
-
-function downloadJson(filename: string, payload: unknown) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  anchor.click()
-  URL.revokeObjectURL(url)
-}
-
-function toSampleState(bundle: TraceBundle): SampleState {
-  const traces = enrichTraces(bundle.traces ?? [])
-  const evaluationSessions = bundle.evaluation_sessions ?? []
-  const evaluations = bundle.evaluations ?? []
-  const sessions: TraceSessionSummary[] = Array.from(new Set(traces.map((trace) => trace.session_id))).map((session_id) => ({
-    session_id,
-    trace_count: traces.filter((trace) => trace.session_id === session_id).length,
-    first_timestamp: traces.find((trace) => trace.session_id === session_id)?.timestamp ?? '',
-    last_timestamp: [...traces].reverse().find((trace) => trace.session_id === session_id)?.timestamp ?? '',
-    annotated_count: traces.filter((trace) => trace.session_id === session_id && trace.notes).length,
-    evaluation: evaluationSessions.find((item) => item.session_id === session_id),
-  }))
-  return { traces, sessions, evaluations, evaluationSessions }
-}
-
-function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  return (
-    <Paper elevation={0} sx={{ flex: 1, minWidth: 160, p: 1.75, background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.025))', border: '1px solid rgba(160,185,255,0.12)', backdropFilter: 'blur(14px)' }}>
-      <Typography variant="caption" sx={{ color: '#8be0b8', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{label}</Typography>
-      <Typography variant="h5" fontWeight={700} sx={{ mt: 0.75 }}>{value}</Typography>
-      {hint ? <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)', mt: 0.5 }}>{hint}</Typography> : null}
-    </Paper>
-  )
-}
-
-function BarChart({ title, data }: { title: string; data: Array<{ label: string; value: number; tone?: string }> }) {
-  const max = Math.max(...data.map((item) => item.value), 1)
-  return (
-    <Paper elevation={0} sx={{ p: 2, background: 'linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.025))', border: '1px solid rgba(160,185,255,0.12)' }}>
-      <Typography variant="subtitle2" fontWeight={700} gutterBottom>{title}</Typography>
-      <Stack spacing={1.25}>
-        {data.map((item) => (
-          <Box key={item.label}>
-            <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
-              <Typography variant="body2">{item.label}</Typography>
-              <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)' }}>{item.value}</Typography>
-            </Stack>
-            <Box sx={{ height: 10, borderRadius: 999, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-              <Box sx={{ height: '100%', width: `${(item.value / max) * 100}%`, background: item.tone ?? 'linear-gradient(90deg, #7dd3a7, #9f7aea)' }} />
-            </Box>
-          </Box>
-        ))}
-      </Stack>
-    </Paper>
-  )
-}
-
-function SectionCard({ eyebrow, title, description, children }: { eyebrow?: string; title: string; description?: string; children: ReactNode }) {
-  return (
-    <Paper sx={{ p: 2.25, background: 'linear-gradient(180deg, rgba(14,20,36,0.92), rgba(8,13,24,0.88))', border: '1px solid rgba(160,185,255,0.11)', boxShadow: '0 20px 48px rgba(0,0,0,0.28)' }}>
-      <Stack spacing={2}>
-        <Box>
-          {eyebrow ? <Typography variant="caption" sx={{ color: '#8be0b8', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{eyebrow}</Typography> : null}
-          <Typography variant="h6" fontWeight={700}>{title}</Typography>
-          {description ? <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)', mt: 0.5 }}>{description}</Typography> : null}
-        </Box>
-        {children}
-      </Stack>
-    </Paper>
-  )
-}
+const ParserPage = lazy(() => import('./pages/ParserPage'))
+const EvaluationPage = lazy(() => import('./pages/EvaluationPage'))
+const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 
 export default function App() {
-  const [page, setPage] = useState<AppPage>(() => pageForPath(window.location.hash || window.location.pathname))
+  const [page, setPage] = useState<AppPage>(() => pageForPath(getCurrentPath()))
   const [sampleState, setSampleState] = useState<SampleState>(EMPTY_SAMPLE_STATE)
   const [sampleLoading, setSampleLoading] = useState(false)
   const [sampleReady, setSampleReady] = useState(false)
@@ -250,7 +68,6 @@ export default function App() {
   const [sessionAnnotatedOnly, setSessionAnnotatedOnly] = useState(false)
 
   const [traces, setTraces] = useState<Trace[]>([])
-  const [treeTraces, setTreeTraces] = useState<Trace[]>([])
   const [tracesTotal, setTracesTotal] = useState(0)
   const [tracePage, setTracePage] = useState(1)
   const [availableTypes, setAvailableTypes] = useState<string[]>([])
@@ -264,24 +81,18 @@ export default function App() {
 
   const [selectedSession, setSelectedSession] = useState('')
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
-  const [compareTraceId, setCompareTraceId] = useState<string>('')
   const [search, setSearch] = useState('')
   const [draftSearch, setDraftSearch] = useState('')
   const [selectedType, setSelectedType] = useState('all')
   const [selectedTag, setSelectedTag] = useState('all')
-  const [tagDraft, setTagDraft] = useState('')
-  const [noteDraft, setNoteDraft] = useState('')
   const [loadingSessions, setLoadingSessions] = useState(true)
   const [loadingTraces, setLoadingTraces] = useState(true)
-  const [loadingTree, setLoadingTree] = useState(true)
   const [loadingEvaluations, setLoadingEvaluations] = useState(true)
-  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [sourceLabel, setSourceLabel] = useState('live API')
-  const [traceViewOpen, setTraceViewOpen] = useState(false)
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
+    const params = new URLSearchParams(getCurrentSearch())
     const sessionId = params.get('session') ?? ''
     const nextSearch = params.get('search') ?? ''
     const nextType = params.get('type') ?? 'all'
@@ -303,7 +114,8 @@ export default function App() {
     setSessionPage(Number.isFinite(nextSessionPage) && nextSessionPage > 0 ? nextSessionPage : 1)
     setTracePage(Number.isFinite(nextTracePage) && nextTracePage > 0 ? nextTracePage : 1)
 
-    const syncRoute = () => setPage(pageForPath(window.location.hash || window.location.pathname))
+    if (!hasWindow()) return
+    const syncRoute = () => setPage(pageForPath(getCurrentPath()))
     window.addEventListener('popstate', syncRoute)
     window.addEventListener('hashchange', syncRoute)
     return () => {
@@ -323,6 +135,7 @@ export default function App() {
     if (evaluationSort !== 'desc') params.set('evaluationSort', evaluationSort)
     if (sessionPage > 1) params.set('sessionPage', String(sessionPage))
     if (tracePage > 1) params.set('tracePage', String(tracePage))
+    if (!hasWindow()) return
     const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}#${pagePath(page)}`
     window.history.replaceState({}, '', nextUrl)
   }, [page, selectedSession, search, selectedType, selectedTag, evaluationStatusFilter, traceSort, evaluationSort, sessionPage, tracePage])
@@ -393,45 +206,6 @@ export default function App() {
     loadSessions()
     return () => { cancelled = true }
   }, [sessionPage, sessionSearch, sessionEvalFilter, sessionAnnotatedOnly])
-
-  useEffect(() => {
-    if (!selectedSession) return
-    let cancelled = false
-    const loadTree = async () => {
-      setLoadingTree(true)
-      try {
-        const params = new URLSearchParams({ session_id: selectedSession, sort: traceSort })
-        if (selectedType !== 'all') params.set('type', selectedType)
-        if (selectedTag !== 'all') params.set('tag', selectedTag)
-        if (search.trim()) params.set('search', search.trim())
-        const response = await fetch(`${API_BASE}/api/traces?${params.toString()}`)
-        if (!response.ok) throw new Error('Tree query failed')
-        const payload = await response.json() as TraceListResponse
-        if (cancelled) return
-        setTreeTraces(enrichTraces(payload.traces ?? []))
-      } catch {
-        if (cancelled) return
-        const fallback = sampleReady ? sampleState : await loadSampleState()
-        const filtered = enrichTraces(fallback.traces).filter((trace) => {
-          if (trace.session_id !== selectedSession) return false
-          if (selectedType !== 'all' && trace.type !== selectedType) return false
-          if (selectedTag !== 'all' && !(trace.tags ?? []).includes(selectedTag)) return false
-          if (search.trim()) {
-            const haystack = JSON.stringify(trace).toLowerCase()
-            if (!haystack.includes(search.trim().toLowerCase())) return false
-          }
-          return true
-        }).sort((a, b) => traceSort === 'asc'
-          ? (a.sequence ?? Number.MAX_SAFE_INTEGER) - (b.sequence ?? Number.MAX_SAFE_INTEGER) || a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id)
-          : (b.sequence ?? Number.MAX_SAFE_INTEGER) - (a.sequence ?? Number.MAX_SAFE_INTEGER) || b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id))
-        setTreeTraces(filtered)
-      } finally {
-        if (!cancelled) setLoadingTree(false)
-      }
-    }
-    loadTree()
-    return () => { cancelled = true }
-  }, [selectedSession, selectedType, selectedTag, search, traceSort, sampleReady])
 
   useEffect(() => {
     if (!selectedSession) return
@@ -514,28 +288,9 @@ export default function App() {
     setTracePage(1)
   }, [selectedSession, selectedType, selectedTag, search])
 
-  const selectedTrace = useMemo(() => {
-    const activeTraces = treeTraces.length ? treeTraces : traces
-    return activeTraces.find((trace) => trace.id === selectedTraceId) ?? traces.find((trace) => trace.id === selectedTraceId) ?? activeTraces[0] ?? traces[0] ?? null
-  }, [treeTraces, traces, selectedTraceId])
-  const compareTrace = useMemo(() => {
-    if (!compareTraceId) return null
-    const activeTraces = treeTraces.length ? treeTraces : traces
-    return activeTraces.find((trace) => trace.id === compareTraceId) ?? traces.find((trace) => trace.id === compareTraceId) ?? null
-  }, [compareTraceId, treeTraces, traces])
-  const traceDiff = useMemo(() => (
-    selectedTrace && compareTrace ? diffTraceObjects(compareTrace, selectedTrace, 60) : []
-  ), [compareTrace, selectedTrace])
-  useEffect(() => {
-    setTagDraft((selectedTrace?.tags ?? []).join(', '))
-    setNoteDraft(selectedTrace?.notes ?? '')
-  }, [selectedTrace?.id])
-
-  useEffect(() => {
-    if (!compareTraceId) return
-    const available = [...treeTraces, ...traces].some((trace) => trace.id === compareTraceId)
-    if (!available || compareTraceId === selectedTraceId) setCompareTraceId('')
-  }, [compareTraceId, selectedTraceId, treeTraces, traces])
+  const selectedTrace = useMemo(() => (
+    traces.find((trace) => trace.id === selectedTraceId) ?? traces[0] ?? null
+  ), [traces, selectedTraceId])
 
   const evaluation = useMemo(() => sessionEvaluations.find((item) => item.session_id === selectedSession), [sessionEvaluations, selectedSession])
   const evaluationByTraceId = useMemo(() => new Map(evaluations.map((item) => [item.target_trace_id, item])), [evaluations])
@@ -569,424 +324,83 @@ export default function App() {
 
   const navigateToPage = (nextPage: AppPage) => {
     setPage(nextPage)
+    if (!hasWindow()) return
     window.history.pushState({}, '', `${window.location.pathname}${window.location.search}#${pagePath(nextPage)}`)
   }
 
-  const saveAnnotations = async () => {
-    if (!selectedTrace) return
-    const tags = tagDraft.split(',').map((item) => item.trim()).filter(Boolean)
-    const nextNotes = noteDraft.trim()
-    setSaving(true)
-    try {
-      const response = await fetch(`${API_BASE}/api/traces/${selectedTrace.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tags, notes: nextNotes }),
-      })
-      if (!response.ok) throw new Error('PATCH failed')
-      const updated = await response.json() as Trace
-      setTraces((current) => current.map((trace) => trace.id === updated.id ? updated : trace))
-      setTreeTraces((current) => current.map((trace) => trace.id === updated.id ? { ...trace, ...updated } : trace))
-      setSelectedTraceId(updated.id)
-      setError(null)
-    } catch (err) {
-      const updated = { ...selectedTrace, tags, notes: nextNotes }
-      setTraces((current) => current.map((trace) => trace.id === updated.id ? updated : trace))
-      setTreeTraces((current) => current.map((trace) => trace.id === updated.id ? { ...trace, ...updated } : trace))
-      setError(`Saved only in local UI state because the API write failed. ${(err as Error).message}`)
-    } finally {
-      setSaving(false)
+  const renderPage = () => {
+    switch (page) {
+      case 'evaluation':
+        return (
+          <EvaluationPage
+            evaluation={evaluation}
+            evaluationCoverage={evaluationCoverage}
+            evaluationSort={evaluationSort}
+            evaluationStatusChart={evaluationStatusChart}
+            evaluationStatusFilter={evaluationStatusFilter}
+            evaluations={evaluations}
+            latestEvaluationHistory={latestEvaluationHistory}
+            selectedEvaluation={selectedEvaluation}
+            selectedTrace={selectedTrace}
+            setEvaluationSort={setEvaluationSort}
+            setEvaluationStatusFilter={setEvaluationStatusFilter}
+          />
+        )
+      case 'dashboard':
+        return (
+          <DashboardPage
+            annotatedCount={annotatedCount}
+            chartByTag={chartByTag}
+            chartByType={chartByType}
+            evaluation={evaluation}
+            evaluationCoverage={evaluationCoverage}
+            evaluationStatusChart={evaluationStatusChart}
+            evaluationStatusFilter={evaluationStatusFilter}
+            lowScoreEvaluations={lowScoreEvaluations}
+            search={search}
+            selectedSession={selectedSession}
+            selectedTag={selectedTag}
+            selectedType={selectedType}
+            sessionCount={sessionCount}
+            sessionPage={sessionPage}
+            sourceLabel={sourceLabel}
+            tracePage={tracePage}
+            tracesLength={traces.length}
+            tracesTotal={tracesTotal}
+          />
+        )
+      case 'parser':
+      default:
+        return (
+          <ParserPage
+            availableTags={availableTags}
+            availableTypes={availableTypes}
+            draftSearch={draftSearch}
+            evaluationByTraceId={evaluationByTraceId}
+            overview={overview}
+            search={search}
+            selectedEvaluation={selectedEvaluation}
+            selectedSession={selectedSession}
+            selectedTag={selectedTag}
+            selectedTrace={selectedTrace}
+            selectedType={selectedType}
+            setDraftSearch={setDraftSearch}
+            setSearch={setSearch}
+            setSelectedTag={setSelectedTag}
+            setSelectedTraceId={setSelectedTraceId}
+            setSelectedType={setSelectedType}
+            setTracePage={setTracePage}
+            setTraceSort={setTraceSort}
+            tracePage={tracePage}
+            traceSort={traceSort}
+            traces={traces}
+            tracesTotal={tracesTotal}
+          />
+        )
     }
   }
 
-  const exportSelectedTrace = () => {
-    if (!selectedTrace) return
-    downloadJson(`trace-${selectedTrace.id}.json`, selectedTrace)
-  }
-
-  const exportFilteredSession = () => {
-    downloadJson(`session-${selectedSession || 'traces'}.json`, {
-      session_id: selectedSession,
-      filters: {
-        search,
-        type: selectedType,
-        tag: selectedTag,
-        traceSort,
-        evaluationStatusFilter,
-      },
-      traces: treeTraces,
-      evaluations,
-    })
-  }
-
-  const renderParserPage = () => (
-    <Stack spacing={3}>
-      <SectionCard
-        eyebrow="Parser"
-        title="Trace review workspace"
-        description="Paged queries, sharper hierarchy, and URL-addressable state make this usable as an actual review tool instead of a one-shot prototype."
-      >
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-          <TextField label="Search timeline" size="small" value={draftSearch} onChange={(event) => setDraftSearch(event.target.value)} placeholder="function, note, payload text…" fullWidth />
-          <TextField select label="Trace type" size="small" value={selectedType} onChange={(event) => setSelectedType(event.target.value)} sx={{ minWidth: 180 }}>
-            <MenuItem value="all">All types</MenuItem>
-            {availableTypes.map((type) => <MenuItem key={type} value={type}>{type}</MenuItem>)}
-          </TextField>
-          <TextField select label="Tag" size="small" value={selectedTag} onChange={(event) => setSelectedTag(event.target.value)} sx={{ minWidth: 180 }}>
-            <MenuItem value="all">All tags</MenuItem>
-            {availableTags.map((tag) => <MenuItem key={tag} value={tag}>{tag}</MenuItem>)}
-          </TextField>
-          <TextField select label="Timeline sort" size="small" value={traceSort} onChange={(event) => { setTracePage(1); setTraceSort(event.target.value as 'asc' | 'desc') }} sx={{ minWidth: 180 }}>
-            <MenuItem value="asc">Oldest first</MenuItem>
-            <MenuItem value="desc">Newest first</MenuItem>
-          </TextField>
-          <Button variant="contained" onClick={() => { setTracePage(1); setSearch(draftSearch) }}>Apply</Button>
-        </Stack>
-        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-          {Object.entries(overview).map(([type, count]) => (
-            <Chip key={type} label={`${type}: ${count}`} color={toneForType(type) as any} variant="outlined" />
-          ))}
-          {search ? <Chip label={`Search: ${search}`} onDelete={() => { setSearch(''); setDraftSearch('') }} /> : null}
-          <Chip label={`Page ${tracePage}/${Math.max(1, Math.ceil(tracesTotal / TRACE_PAGE_SIZE))}`} variant="outlined" />
-          <Chip label={`Sort: ${traceSort === 'asc' ? 'oldest first' : 'newest first'}`} variant="outlined" />
-          <Chip label={`${tracesTotal} total matches`} variant="outlined" />
-          <Chip label={`Session ${selectedSession || '—'}`} variant="outlined" />
-        </Stack>
-      </SectionCard>
-
-      <Stack direction={{ xs: 'column', xl: 'row' }} spacing={3} alignItems="stretch">
-        <SectionCard title="Trace timeline" description={`${traces.length} traces on this page · ${tracesTotal} matching the current query.`}>
-          <List sx={{ maxHeight: 760, overflow: 'auto', py: 0 }}>
-            {traces.map((trace) => {
-              const traceEval = evaluationByTraceId.get(trace.id)
-              return (
-                <Box key={trace.id}>
-                  <ListItemButton selected={selectedTrace?.id === trace.id} onClick={() => setSelectedTraceId(trace.id)}>
-                    <ListItemText
-                      primary={`${trace.function} · ${trace.type}`}
-                      secondary={safeText(trace).slice(0, 120)}
-                    />
-                    <Stack alignItems="flex-end" spacing={0.5}>
-                      {traceEval ? <Chip size="small" label={pct(traceEval.score)} color={toneForStatus(traceEval.status) as any} variant="outlined" /> : null}
-                      {trace.notes ? <Chip size="small" label="note" variant="outlined" /> : null}
-                    </Stack>
-                  </ListItemButton>
-                  <Divider component="li" />
-                </Box>
-              )
-            })}
-          </List>
-          <Stack direction="row" justifyContent="center">
-            <Pagination count={Math.max(1, Math.ceil(tracesTotal / TRACE_PAGE_SIZE))} page={tracePage} onChange={(_, next) => setTracePage(next)} color="primary" />
-          </Stack>
-        </SectionCard>
-
-        <Stack sx={{ flex: 1.15 }} spacing={3}>
-          <TraceTree traces={treeTraces} selectedTraceId={selectedTrace?.id ?? null} onSelect={setSelectedTraceId} title={loadingTree ? 'Trace tree · loading…' : 'Trace tree'} />
-          <SectionCard title="Selected trace" description="Trace payload, annotations, and evaluation context stay together so review work is less annoying.">
-            {selectedTrace ? (
-              <>
-                <Stack direction="row" spacing={1} mb={1} flexWrap="wrap" useFlexGap>
-                  <Chip size="small" label={selectedTrace.type} color={toneForType(selectedTrace.type) as any} />
-                  <Chip size="small" label={selectedTrace.function} variant="outlined" />
-                  <Chip size="small" label={`Seq ${selectedTrace.sequence ?? '—'}`} variant="outlined" />
-                  {selectedTrace.parent_trace_id ? <Chip size="small" label={`Parent ${selectedTrace.parent_reason ?? 'trace'} · ${selectedTrace.parent_trace_id}`} variant="outlined" /> : <Chip size="small" label="Root trace" variant="outlined" />}
-                  <Chip size="small" label={new Date(selectedTrace.timestamp).toLocaleString()} variant="outlined" />
-                  {selectedEvaluation ? <Chip size="small" label={`Eval ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} variant="outlined" /> : null}
-                </Stack>
-
-                <Paper elevation={0} sx={{ p: 2, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
-                  <Typography variant="subtitle2" fontWeight={700} gutterBottom>Tags, export & notes</Typography>
-                  <Stack spacing={1.5}>
-                    <TextField label="Tags" helperText="Comma-separated. Persisted via PATCH /api/traces/:id." size="small" value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} />
-                    <TextField label="Notes" multiline minRows={3} value={noteDraft} onChange={(event) => setNoteDraft(event.target.value)} placeholder="Why this trace matters, what looks risky, or what to revisit later." />
-                    <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} flexWrap="wrap">
-                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                        {(selectedTrace.tags ?? []).map((tag) => <Chip key={tag} size="small" label={tag} variant="outlined" />)}
-                      </Stack>
-                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                        <Button variant="outlined" onClick={exportSelectedTrace} startIcon={<DownloadRoundedIcon />}>Export trace</Button>
-                        <Button variant="outlined" onClick={exportFilteredSession} startIcon={<DownloadRoundedIcon />}>Export session slice</Button>
-                        <Button variant="outlined" onClick={() => setTraceViewOpen(true)} startIcon={<OpenInFullRoundedIcon />}>Full-screen trace</Button>
-                        <Button variant="contained" onClick={saveAnnotations} disabled={saving} startIcon={saving ? <CircularProgress size={16} color="inherit" /> : undefined}>Save annotation</Button>
-                      </Stack>
-                    </Stack>
-                  </Stack>
-                </Paper>
-
-                <Paper elevation={0} sx={{ p: 2, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
-                  <Stack spacing={1.5}>
-                    <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
-                      <Box>
-                        <Typography variant="subtitle2" fontWeight={700}>Diff tool</Typography>
-                        <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)' }}>
-                          Compare this trace against another trace in the current filtered session slice and export whichever payloads you need.
-                        </Typography>
-                      </Box>
-                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
-                        <TextField
-                          select
-                          size="small"
-                          label="Compare against"
-                          value={compareTraceId}
-                          onChange={(event) => setCompareTraceId(event.target.value)}
-                          sx={{ minWidth: 280 }}
-                        >
-                          <MenuItem value="">None</MenuItem>
-                          {treeTraces.filter((trace) => trace.id !== selectedTrace.id).map((trace) => (
-                            <MenuItem key={trace.id} value={trace.id}>{`${trace.sequence ?? '—'} · ${trace.function} · ${trace.type}`}</MenuItem>
-                          ))}
-                        </TextField>
-                        <Button variant="outlined" disabled={!compareTrace} onClick={() => compareTrace && downloadJson(`trace-diff-${compareTrace.id}-vs-${selectedTrace.id}.json`, { base: compareTrace, target: selectedTrace, diff: traceDiff })} startIcon={<DifferenceRoundedIcon />}>Export diff</Button>
-                      </Stack>
-                    </Stack>
-
-                    {compareTrace ? (
-                      <>
-                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                          <Chip size="small" label={`Base ${compareTrace.function}`} variant="outlined" />
-                          <Chip size="small" label={`Target ${selectedTrace.function}`} variant="outlined" />
-                          <Chip size="small" label={`${traceDiff.length} diff ${traceDiff.length === 1 ? 'entry' : 'entries'}`} color={traceDiff.length ? 'warning' : 'success'} variant="outlined" />
-                        </Stack>
-                        {traceDiff.length ? (
-                          <Table size="small" sx={{ '& td, & th': { borderColor: 'rgba(160,185,255,0.1)', verticalAlign: 'top' } }}>
-                            <TableHead>
-                              <TableRow>
-                                <TableCell>Path</TableCell>
-                                <TableCell>Base</TableCell>
-                                <TableCell>Target</TableCell>
-                              </TableRow>
-                            </TableHead>
-                            <TableBody>
-                              {traceDiff.slice(0, 12).map((entry) => (
-                                <TableRow key={entry.path}>
-                                  <TableCell sx={{ whiteSpace: 'nowrap', color: '#8be0b8' }}>{entry.path}</TableCell>
-                                  <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem', wordBreak: 'break-word' }}>{JSON.stringify(entry.left)}</TableCell>
-                                  <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem', wordBreak: 'break-word' }}>{JSON.stringify(entry.right)}</TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        ) : <Alert severity="success" variant="outlined">These traces serialize the same under the current diff rules.</Alert>}
-                      </>
-                    ) : <Alert severity="info" variant="outlined">Choose another trace to see a field-level diff.</Alert>}
-                  </Stack>
-                </Paper>
-
-                {selectedEvaluation ? (
-                  <Paper elevation={0} sx={{ p: 2, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
-                    <Stack spacing={1.25}>
-                      <Typography variant="subtitle2" fontWeight={700}>Evaluation context</Typography>
-                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                        <Chip size="small" label={selectedEvaluation.label} variant="outlined" />
-                        <Chip size="small" label={`Score ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} />
-                        <Chip size="small" label={`Band ${selectedEvaluation.score_band ?? 'derived'}`} variant="outlined" />
-                        {Object.entries(selectedEvaluation.metrics).map(([metric, value]) => (
-                          <Chip key={metric} size="small" label={`${formatMetricLabel(metric)} · ${pct(value)}`} variant="outlined" />
-                        ))}
-                      </Stack>
-                      <Alert severity={selectedEvaluation.status === 'pass' ? 'success' : selectedEvaluation.status === 'warn' ? 'warning' : 'error'} variant="outlined">
-                        {describeEvalStatus(selectedEvaluation)}
-                      </Alert>
-                      {selectedEvaluation.notes.map((note) => (
-                        <Typography key={note} variant="body2" sx={{ color: 'rgba(228,235,255,0.72)' }}>• {note}</Typography>
-                      ))}
-                    </Stack>
-                  </Paper>
-                ) : null}
-
-                <JsonViewer data={selectedTrace} title="Trace payload" maxHeight={420} />
-              </>
-            ) : <Typography>No trace selected.</Typography>}
-          </SectionCard>
-        </Stack>
-      </Stack>
-    </Stack>
-  )
-
-  const renderEvaluationPage = () => (
-    <Stack spacing={3}>
-      <SectionCard
-        eyebrow="Evaluation"
-        title="Quality review"
-        description="Independent evaluation paging/filtering plus routeable state means the quality view is finally shareable without a ritual of clicking first."
-      >
-        {evaluation ? (
-          <Stack spacing={2}>
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} useFlexGap flexWrap="wrap">
-              <StatCard label="Average" value={pct(evaluation.average_score)} hint={`${evaluation.evaluation_count} eval runs`} />
-              <StatCard label="Latest" value={pct(evaluation.latest_score)} hint={`status: ${evaluation.latest_status}`} />
-              <StatCard label="Delta" value={`${evaluation.score_delta >= 0 ? '+' : ''}${pct(evaluation.score_delta)}`} hint={evaluation.improving ? 'trend improving' : 'trend mixed'} />
-              <StatCard label="Coverage" value={pct(evaluationCoverage)} hint={`${evaluations.length} visible evals vs assistant turns`} />
-            </Stack>
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-              <TextField select label="Status" size="small" value={evaluationStatusFilter} onChange={(event) => setEvaluationStatusFilter(event.target.value)} sx={{ minWidth: 180 }}>
-                <MenuItem value="all">All statuses</MenuItem>
-                <MenuItem value="pass">Pass</MenuItem>
-                <MenuItem value="warn">Warn</MenuItem>
-                <MenuItem value="fail">Fail</MenuItem>
-              </TextField>
-              <TextField select label="Eval sort" size="small" value={evaluationSort} onChange={(event) => setEvaluationSort(event.target.value as 'desc' | 'asc')} sx={{ minWidth: 180 }}>
-                <MenuItem value="desc">Newest first</MenuItem>
-                <MenuItem value="asc">Oldest first</MenuItem>
-              </TextField>
-              <Chip label={`${evaluations.length} evaluations loaded`} variant="outlined" sx={{ alignSelf: 'center' }} />
-            </Stack>
-            <Stack spacing={1}>
-              <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)' }}>Session quality score</Typography>
-              <LinearProgress variant="determinate" value={evaluation.average_score * 100} sx={{ height: 10, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.08)' }} />
-            </Stack>
-          </Stack>
-        ) : (
-          <Alert severity="info" variant="outlined">No evaluation runs found for this session yet.</Alert>
-        )}
-      </SectionCard>
-
-      <Stack direction={{ xs: 'column', xl: 'row' }} spacing={3}>
-        <Box sx={{ flex: 1 }}>
-          <SectionCard title="Status breakdown" description="Fast read on how the current session is grading out.">
-            {evaluationStatusChart.length ? <BarChart title="Evaluation status counts" data={evaluationStatusChart} /> : <Alert severity="info" variant="outlined">No status breakdown available yet.</Alert>}
-          </SectionCard>
-        </Box>
-
-        <Box sx={{ flex: 1.1 }}>
-          <SectionCard title="Recent assistant-turn evaluations" description="Latest scored turns for the active session, newest first.">
-            {latestEvaluationHistory.length ? (
-              <Stack spacing={1.25}>
-                {latestEvaluationHistory.map((item) => (
-                  <Paper key={item.id} elevation={0} sx={{ p: 1.5, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
-                    <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" spacing={1}>
-                      <Box>
-                        <Typography variant="subtitle2" fontWeight={700}>{item.label}</Typography>
-                        <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)' }}>{new Date(item.timestamp).toLocaleString()}</Typography>
-                      </Box>
-                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                        <Chip size="small" label={pct(item.score)} color={toneForStatus(item.status) as any} variant="outlined" />
-                        <Chip size="small" label={item.target_trace_id} variant="outlined" />
-                      </Stack>
-                    </Stack>
-                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 1.25 }}>
-                      <Chip size="small" label={`Band ${item.score_band ?? 'derived'}`} variant="outlined" />
-                      {Object.entries(item.metrics).map(([metric, value]) => (
-                        <Chip key={metric} size="small" label={`${formatMetricLabel(metric)} · ${pct(value)}`} variant="outlined" />
-                      ))}
-                    </Stack>
-                    <Alert severity={item.status === 'pass' ? 'success' : item.status === 'warn' ? 'warning' : 'error'} variant="outlined" sx={{ mt: 1.25 }}>
-                      {describeEvalStatus(item)}
-                    </Alert>
-                    {item.notes.length ? (
-                      <Stack spacing={0.5} sx={{ mt: 1.25 }}>
-                        {item.notes.map((note) => (
-                          <Typography key={note} variant="body2" sx={{ color: 'rgba(228,235,255,0.72)' }}>• {note}</Typography>
-                        ))}
-                      </Stack>
-                    ) : null}
-                  </Paper>
-                ))}
-              </Stack>
-            ) : <Alert severity="info" variant="outlined">No evaluation history available yet.</Alert>}
-          </SectionCard>
-        </Box>
-      </Stack>
-
-      <SectionCard title="Selected trace evaluation context" description="Still tied to the parser selection, but now sourced from the shared evaluation result map instead of only the session summary.">
-        {selectedEvaluation ? (
-          <Stack spacing={1.5}>
-            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-              <Chip size="small" label={`Score ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} />
-              <Chip size="small" label={selectedTrace?.function ?? 'selected trace'} variant="outlined" />
-              <Chip size="small" label={selectedEvaluation.label} variant="outlined" />
-              <Chip size="small" label={`Band ${selectedEvaluation.score_band ?? 'derived'}`} variant="outlined" />
-            </Stack>
-            <Alert severity={selectedEvaluation.status === 'pass' ? 'success' : selectedEvaluation.status === 'warn' ? 'warning' : 'error'} variant="outlined">
-              {describeEvalStatus(selectedEvaluation)}
-            </Alert>
-            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-              {Object.entries(selectedEvaluation.metrics).map(([metric, value]) => (
-                <Chip key={metric} size="small" label={`${formatMetricLabel(metric)} · ${pct(value)}`} variant="outlined" />
-              ))}
-            </Stack>
-            {selectedEvaluation.notes.map((note) => (
-              <Typography key={note} variant="body2" sx={{ color: 'rgba(228,235,255,0.72)' }}>• {note}</Typography>
-            ))}
-          </Stack>
-        ) : <Alert severity="info" variant="outlined">Pick a trace with evaluation data from the Parser overview page to inspect it here.</Alert>}
-      </SectionCard>
-    </Stack>
-  )
-
-  const renderDashboardPage = () => (
-    <Stack spacing={3}>
-      <SectionCard
-        eyebrow="Dashboard"
-        title="Operational readout"
-        description="Tighter cards, better contrast, and a less decorative layout make the dashboard useful instead of merely screenshot-friendly."
-      >
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} useFlexGap flexWrap="wrap">
-          <StatCard label="Sessions" value={String(sessionCount)} hint="matching current session query" />
-          <StatCard label="Visible traces" value={String(traces.length)} hint={`${tracesTotal} total matches`} />
-          <StatCard label="Annotated" value={String(annotatedCount)} hint="notes on visible traces" />
-          <StatCard label="Avg quality" value={evaluation ? pct(evaluation.average_score) : '—'} hint={evaluation ? `${evaluation.evaluation_count} total eval runs` : 'no evaluations'} />
-        </Stack>
-      </SectionCard>
-
-      <Stack direction={{ xs: 'column', xl: 'row' }} spacing={3}>
-        <Box sx={{ flex: 1 }}>
-          {chartByType.length ? <BarChart title="Counts by trace type" data={chartByType} /> : <Alert severity="info" variant="outlined">No trace data yet.</Alert>}
-        </Box>
-        <Box sx={{ flex: 1 }}>
-          {chartByTag.length ? <BarChart title="Top tags in current view" data={chartByTag} /> : <Alert severity="info" variant="outlined">No tags match this filter set.</Alert>}
-        </Box>
-      </Stack>
-
-      <Stack direction={{ xs: 'column', xl: 'row' }} spacing={3}>
-        <Box sx={{ flex: 1 }}>
-          {evaluationStatusChart.length ? <BarChart title="Visible evaluation statuses" data={evaluationStatusChart} /> : <Alert severity="info" variant="outlined">No evaluation data for this session view.</Alert>}
-        </Box>
-        <Box sx={{ flex: 1 }}>
-          <SectionCard title="Coverage & focus" description="Makes it easier to see whether the session is being reviewed deeply enough.">
-            <Stack spacing={1.25}>
-              <Typography variant="body2"><strong>Source:</strong> {sourceLabel}</Typography>
-              <Typography variant="body2"><strong>Selected session:</strong> {selectedSession || '—'}</Typography>
-              <Typography variant="body2"><strong>Trace filters:</strong> {selectedType} / {selectedTag} / {search || 'no search'}</Typography>
-              <Typography variant="body2"><strong>Evaluation filter:</strong> {evaluationStatusFilter}</Typography>
-              <Typography variant="body2"><strong>Evaluation coverage:</strong> {pct(evaluationCoverage)}</Typography>
-              <Typography variant="body2"><strong>Session page:</strong> {sessionPage}</Typography>
-              <Typography variant="body2"><strong>Trace page:</strong> {tracePage}</Typography>
-              <Typography variant="body2"><strong>Fallback asset:</strong> {SAMPLE_BUNDLE_URL}</Typography>
-            </Stack>
-          </SectionCard>
-        </Box>
-      </Stack>
-
-      <SectionCard title="Lowest-scoring evaluations" description="A simple triage list so the dashboard has an actual action surface instead of decorative wallpaper.">
-        {lowScoreEvaluations.length ? (
-          <Stack spacing={1.25}>
-            {lowScoreEvaluations.map((item) => (
-              <Paper key={item.id} elevation={0} sx={{ p: 1.5, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
-                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1}>
-                  <Box>
-                    <Typography variant="subtitle2" fontWeight={700}>{item.label}</Typography>
-                    <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)' }}>{item.target_trace_id}</Typography>
-                  </Box>
-                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    <Chip size="small" label={pct(item.score)} color={toneForStatus(item.status) as any} variant="outlined" />
-                    <Chip size="small" label={new Date(item.timestamp).toLocaleString()} variant="outlined" />
-                  </Stack>
-                </Stack>
-                {item.notes.slice(0, 2).map((note) => (
-                  <Typography key={note} variant="body2" sx={{ color: 'rgba(228,235,255,0.72)', mt: 1 }}>• {note}</Typography>
-                ))}
-              </Paper>
-            ))}
-          </Stack>
-        ) : <Alert severity="info" variant="outlined">No evaluation data to triage for this view.</Alert>}
-      </SectionCard>
-    </Stack>
-  )
-
   return (
-    <>
     <Box sx={{ minHeight: '100vh', background: 'radial-gradient(circle at top, rgba(99,102,241,0.18) 0%, rgba(13,18,34,1) 38%, rgba(5,8,16,1) 100%)', p: { xs: 2, md: 3 } }}>
       <Box sx={{ position: 'fixed', inset: 0, pointerEvents: 'none', background: 'linear-gradient(120deg, rgba(125,211,167,0.05), transparent 28%, transparent 72%, rgba(192,132,252,0.05))' }} />
       <Stack spacing={3} sx={{ position: 'relative' }}>
@@ -1045,8 +459,6 @@ export default function App() {
                 })}
               </Stack>
 
-              <Divider />
-
               <Stack spacing={1.5}>
                 <Typography variant="subtitle2" fontWeight={700}>Sessions</Typography>
                 <TextField size="small" label="Find session" value={sessionSearchDraft} onChange={(event) => setSessionSearchDraft(event.target.value)} onKeyDown={(event) => {
@@ -1061,6 +473,7 @@ export default function App() {
                     <MenuItem value="with">With evaluations</MenuItem>
                     <MenuItem value="without">Without evaluations</MenuItem>
                   </TextField>
+
                   <TextField select size="small" label="Annotations" value={sessionAnnotatedOnly ? 'annotated' : 'all'} onChange={(event) => { setSessionPage(1); setSessionAnnotatedOnly(event.target.value === 'annotated') }}>
                     <MenuItem value="all">All sessions</MenuItem>
                     <MenuItem value="annotated">Annotated only</MenuItem>
@@ -1095,45 +508,12 @@ export default function App() {
               <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)', mt: 0.5 }}>{currentPageMeta.description}</Typography>
             </Paper>
 
-            {page === 'parser' ? renderParserPage() : null}
-            {page === 'evaluation' ? renderEvaluationPage() : null}
-            {page === 'dashboard' ? renderDashboardPage() : null}
+            <Suspense fallback={<PageLoadingState />}>
+              {renderPage()}
+            </Suspense>
           </Box>
         </Stack>
       </Stack>
     </Box>
-    <Dialog fullScreen open={traceViewOpen && Boolean(selectedTrace)} onClose={() => setTraceViewOpen(false)}>
-      <DialogContent sx={{ p: { xs: 2, md: 3 }, background: 'radial-gradient(circle at top, rgba(99,102,241,0.16) 0%, rgba(13,18,34,1) 42%, rgba(5,8,16,1) 100%)' }}>
-        {selectedTrace ? (
-          <Stack spacing={2.5}>
-            <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
-              <Box>
-                <Typography variant="h4" fontWeight={700}>Trace detail</Typography>
-                <Typography variant="body1" sx={{ color: 'rgba(228,235,255,0.72)', mt: 1 }}>
-                  Full-screen inspection for long payloads and dense trace metadata.
-                </Typography>
-              </Box>
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                <Chip label={selectedTrace.type} color={toneForType(selectedTrace.type) as any} />
-                <Chip label={selectedTrace.function} variant="outlined" />
-                <Chip label={`Seq ${selectedTrace.sequence ?? '—'}`} variant="outlined" />
-                <Button variant="contained" onClick={() => setTraceViewOpen(false)}>Close</Button>
-              </Stack>
-            </Stack>
-            <SectionCard title="Trace metadata" description="Key linkage fields stay visible while you scroll the payload.">
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                <Chip label={`Session ${selectedTrace.session_id}`} variant="outlined" />
-                <Chip label={`Trace ${selectedTrace.id}`} variant="outlined" />
-                {selectedTrace.parent_trace_id ? <Chip label={`Parent ${selectedTrace.parent_reason ?? 'trace'} · ${selectedTrace.parent_trace_id}`} variant="outlined" /> : <Chip label="Root trace" variant="outlined" />}
-                <Chip label={new Date(selectedTrace.timestamp).toLocaleString()} variant="outlined" />
-                {selectedEvaluation ? <Chip label={`Eval ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} variant="outlined" /> : null}
-              </Stack>
-            </SectionCard>
-            <JsonViewer data={selectedTrace} title="Trace payload" maxHeight="calc(100vh - 320px)" />
-          </Stack>
-        ) : null}
-      </DialogContent>
-    </Dialog>
-    </>
   )
 }

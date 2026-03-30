@@ -2,23 +2,22 @@
 
 Trace review UI for browsing Copilot sessions, evaluation history, and per-trace payloads.
 
-## What changed
+## Current shape
 
-Recent trace-tree upgrades include:
+The UI is intentionally split into three focused pages:
 
-- **Zoom + pan trace tree** for dense sessions.
-- **Waypoint mini-map** for jumping across roots and the active branch.
-- **Export tools** for the visible tree/session slice, selected path, selected trace, and trace diffs.
-- **Trace diff tool** in the selected-trace panel for comparing two traces from the current filtered session.
+- **Parser overview** — timeline-first session review with filters, paging, and a docked selected-trace panel.
+- **Evaluation** — session score trends, recent trace evaluations, and score breakdowns.
+- **Dashboard** — aggregate counts, coverage signals, and low-score triage.
 
 ## Run
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
-## Test
+## Test and build
 
 ```bash
 npm run test
@@ -28,4 +27,7 @@ npm run build
 ## Notes
 
 - The app prefers the live API, but falls back to `public/traces.sample.json` when the API is unavailable.
-- Diff output is intentionally lightweight and path-oriented so reviewers can quickly spot field-level changes without leaving the UI.
+- Page route and filter state stay in the URL so a focused review view can be reopened or shared locally.
+- The three major views are lazy-loaded so the initial shell stays lighter and only fetches a page bundle when someone opens it.
+- Vite manual chunks split React, MUI core, MUI icons, and the remaining vendor code into separate bundles to keep the main app chunk from swallowing the whole UI at once.
+- Old trace-tree and fullscreen-navigation experiments were removed to keep the UI aligned with the current review workflow.
