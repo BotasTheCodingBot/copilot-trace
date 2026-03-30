@@ -21,17 +21,20 @@ if [[ "$(uname -s)" =~ MINGW ]] || [[ "$(uname -s)" =~ MSYS ]]; then
   VENV_DIR="$(convert_path "$VENV_DIR")"
 fi
 
-detect_python() {
-  local name="$1"
-  command -v "$name" >/dev/null 2>&1
-}
+VENV_BIN="$VENV_DIR/bin"
+if [[ -d "$VENV_DIR/Scripts" ]]; then
+  VENV_BIN="$VENV_DIR/Scripts"
+fi
 
-if ! detect_python "$PYTHON_BIN"; then
-  if detect_python python3; then
-    PYTHON_BIN=python3
-  elif detect_python python; then
+PYTHON_EXEC="$VENV_BIN/python"
+if [[ -f "$VENV_BIN/python.exe" ]]; then
+  PYTHON_EXEC="$VENV_BIN/python.exe"
+fi
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1; then
     PYTHON_BIN=python
-  elif detect_python py; then
+  elif command -v py >/dev/null 2>&1; then
     PYTHON_BIN="py -3"
   else
     echo "python interpreter not found" >&2
@@ -39,16 +42,7 @@ if ! detect_python "$PYTHON_BIN"; then
   fi
 fi
 
-VENV_BIN="$VENV_DIR/bin"
-if [[ -d "$VENV_DIR/Scripts" ]]; then
-  VENV_BIN="$VENV_DIR/Scripts"
-fi
-
 "$PYTHON_BIN" -m venv "$VENV_DIR"
-VENV_PYTHON="$VENV_BIN/python"
-if [[ -f "$VENV_BIN/python.exe" ]]; then
-  VENV_PYTHON="$VENV_BIN/python.exe"
-fi
-
-"$VENV_PYTHON" -m pip install --upgrade pip
-"$VENV_PYTHON" -m pip install -r "$ROOT_DIR/requirements.txt"
+"$PYTHON_EXEC" -m pip install --upgrade pip
+"$PYTHON_EXEC" -m pip install -e "$ROOT_DIR"
+"$PYTHON_EXEC" -m pip install -r "$ROOT_DIR/requirements.txt"
