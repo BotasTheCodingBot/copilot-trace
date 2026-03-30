@@ -22,19 +22,16 @@ if [[ "$(uname -s)" =~ MINGW ]] || [[ "$(uname -s)" =~ MSYS ]]; then
 fi
 
 detect_python() {
-  if command -v "$1" >/dev/null 2>&1; then
-    echo "$1"
-    return
-  fi
-  return 1
+  local name="$1"
+  command -v "$name" >/dev/null 2>&1
 }
 
-if ! detect_python "$PYTHON_BIN" >/dev/null 2>&1; then
-  if detect_python python3 >/dev/null 2>&1; then
+if ! detect_python "$PYTHON_BIN"; then
+  if detect_python python3; then
     PYTHON_BIN=python3
-  elif detect_python python >/dev/null 2>&1; then
+  elif detect_python python; then
     PYTHON_BIN=python
-  elif detect_python py >/dev/null 2>&1; then
+  elif detect_python py; then
     PYTHON_BIN="py -3"
   else
     echo "python interpreter not found" >&2
@@ -48,5 +45,10 @@ if [[ -d "$VENV_DIR/Scripts" ]]; then
 fi
 
 "$PYTHON_BIN" -m venv "$VENV_DIR"
-"$VENV_BIN/pip" install --upgrade pip
-"$VENV_BIN/pip" install -r "$ROOT_DIR/requirements.txt"
+VENV_PYTHON="$VENV_BIN/python"
+if [[ -f "$VENV_BIN/python.exe" ]]; then
+  VENV_PYTHON="$VENV_BIN/python.exe"
+fi
+
+"$VENV_PYTHON" -m pip install --upgrade pip
+"$VENV_PYTHON" -m pip install -r "$ROOT_DIR/requirements.txt"
