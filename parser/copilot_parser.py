@@ -265,7 +265,7 @@ class CopilotSessionParser:
         json_path = Path(json_path)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         normalized_rows = list(rows)
-        serialized = [self.trace_to_agent_dict(row) for row in normalized_rows]
+        serialized = self.enrich_agent_traces([self.trace_to_agent_dict(row) for row in normalized_rows])
         evaluations = [self.evaluator.to_payload(item) for item in self.evaluator.evaluate_rows(normalized_rows)]
         session_evaluations = self.evaluator.summarize(self.evaluator.evaluate_rows(normalized_rows))
         payload = {
@@ -299,6 +299,41 @@ class CopilotSessionParser:
         }
         payload.update(self._json_safe(row.data))
         return payload
+
+    def enrich_agent_traces(self, traces: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for trace in traces:
+            grouped.setdefault(str(trace.get('session_id') or ''), []).append(trace)
+
+        enriched: list[dict[str, Any]] = []
+        for session_id in sorted(grouped):
+            session_traces = sorted(
+                grouped[session_id],
+                key=lambda trace: (str(trace.get('timestamp') or ''), str(trace.get('id') or '')),
+            )
+            message_ids = {str(trace.get('message_id')): str(trace.get('id')) for trace in session_traces if trace.get('message_id')}
+            tool_call_ids = {str(trace.get('tool_call_id')): str(trace.get('id')) for trace in session_traces if trace.get('tool_call_id') and trace.get('trace_type') == 'TOOL_CALL'}
+
+            for index, trace in enumerate(session_traces, start=1):
+                trace_type = str(trace.get('trace_type') or trace.get('type') or '')
+                parent_trace_id = None
+                parent_reason = None
+                if trace_type == 'TOOL_CALL':
+                    parent_trace_id = message_ids.get(str(trace.get('message_id') or ''))
+                    parent_reason = 'message' if parent_trace_id else None
+                elif trace_type == 'TOOL_RESULT':
+                    parent_trace_id = tool_call_ids.get(str(trace.get('tool_call_id') or ''))
+                    parent_reason = 'tool_call' if parent_trace_id else None
+
+                enriched_trace = {
+                    **trace,
+                    'sequence': index,
+                    'sequence_id': f"{session_id}:{index}",
+                    'parent_trace_id': parent_trace_id,
+                    'parent_reason': parent_reason,
+                }
+                enriched.append(enriched_trace)
+        return enriched
 
     def _extract_session_id(self, session_meta: dict[str, Any]) -> str | None:
         session_id = session_meta.get('Id')

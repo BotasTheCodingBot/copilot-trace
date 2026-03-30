@@ -97,6 +97,7 @@ class TraceRepository:
         limit: int | None = None,
         offset: int = 0,
         include_evaluations: bool = False,
+        sort: str = 'asc',
     ) -> dict[str, Any]:
         query = 'SELECT id, session_id, timestamp, trace_type, function_name, tags, data FROM traces'
         count_query = 'SELECT COUNT(*) FROM traces'
@@ -116,7 +117,8 @@ class TraceRepository:
             like = f'%{search.lower()}%'
             params.extend([like, like, like])
         where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
-        query += where + ' ORDER BY timestamp, session_id, id'
+        sort_direction = self._normalize_sort_direction(sort)
+        query += where + f' ORDER BY timestamp {sort_direction}, session_id {sort_direction}, id {sort_direction}'
         count_query += where
         if limit is not None:
             query += ' LIMIT ? OFFSET ?'
@@ -137,12 +139,12 @@ class TraceRepository:
                 trace_ids = [row[0] for row in rows]
                 placeholders = ','.join('?' for _ in trace_ids)
                 eval_rows = conn.execute(
-                    f'SELECT id, session_id, timestamp, target_trace_id, label, score, status, metrics, notes FROM evaluations WHERE target_trace_id IN ({placeholders}) ORDER BY timestamp, id',
+                    f'SELECT id, session_id, timestamp, target_trace_id, label, score, status, metrics, notes FROM evaluations WHERE target_trace_id IN ({placeholders}) ORDER BY timestamp {sort_direction}, id {sort_direction}',
                     trace_ids,
                 ).fetchall()
                 evaluations = [self._row_to_evaluation_payload(row) for row in eval_rows]
 
-        traces = [self._row_to_trace_payload(row) for row in rows]
+        traces = self.parser.enrich_agent_traces([self._row_to_trace_payload(row) for row in rows])
         available_types = sorted({row[0] for row in filter_rows if row[0]})
         available_tags = sorted({tag_value for _, tags_blob in filter_rows for tag_value in (json.loads(tags_blob) if tags_blob else [])})
         return {
@@ -166,6 +168,7 @@ class TraceRepository:
         target_trace_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        sort: str = 'desc',
     ) -> dict[str, Any]:
         query = 'SELECT id, session_id, timestamp, target_trace_id, label, score, status, metrics, notes FROM evaluations'
         count_query = 'SELECT COUNT(*) FROM evaluations'
@@ -181,7 +184,8 @@ class TraceRepository:
             clauses.append('target_trace_id = ?')
             params.append(target_trace_id)
         where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
-        query += where + ' ORDER BY timestamp DESC, id DESC'
+        sort_direction = self._normalize_sort_direction(sort, default='DESC')
+        query += where + f' ORDER BY timestamp {sort_direction}, id {sort_direction}'
         count_query += where
         if limit is not None:
             query += ' LIMIT ? OFFSET ?'
@@ -215,7 +219,8 @@ class TraceRepository:
             ).fetchone()
         if not row:
             return None
-        return self._row_to_trace_payload(row)
+        trace = self._row_to_trace_payload(row)
+        return self._enrich_single_trace(trace)
 
     def update_trace_annotations(self, trace_id: str, *, tags: list[str] | None = None, notes: str | None = None) -> dict[str, Any] | None:
         with sqlite3.connect(self.db_path) as conn:
@@ -256,6 +261,16 @@ class TraceRepository:
             'status_breakdown': statuses,
         }
 
+    def _normalize_sort_direction(self, value: str | None, *, default: str = 'ASC') -> str:
+        if not value:
+            return default
+        normalized = value.strip().lower()
+        if normalized in {'asc', 'oldest', 'oldest_first'}:
+            return 'ASC'
+        if normalized in {'desc', 'newest', 'newest_first'}:
+            return 'DESC'
+        return default
+
     def _normalize_tags(self, tags: list[str] | None) -> list[str]:
         if not tags:
             return []
@@ -284,17 +299,45 @@ class TraceRepository:
         )
         return self.parser.trace_to_agent_dict(trace)
 
+    def _enrich_single_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
+        session_id = trace.get('session_id')
+        if not session_id:
+            return trace
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                'SELECT id, session_id, timestamp, trace_type, function_name, tags, data FROM traces WHERE session_id = ? ORDER BY timestamp ASC, id ASC',
+                (session_id,),
+            ).fetchall()
+        enriched = self.parser.enrich_agent_traces([self._row_to_trace_payload(row) for row in rows])
+        by_id = {item['id']: item for item in enriched}
+        return by_id.get(trace['id'], trace)
+
     def _row_to_evaluation_payload(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        metrics = json.loads(row[7]) if row[7] else {}
+        notes = json.loads(row[8]) if row[8] else []
+        score = row[5]
+        status = row[6]
+        score_band = 'excellent' if score >= 0.9 else 'strong' if score >= 0.75 else 'needs_review' if score >= 0.5 else 'high_risk'
+        weakest_metric = min(metrics.items(), key=lambda item: item[1])[0].replace('_', ' ') if metrics else 'unknown'
+        threshold_text = 'pass ≥ 75%, warn ≥ 50%, fail < 50%'
+        if status == 'pass':
+            status_explanation = f'Scored {score:.0%}, passing the current rubric ({threshold_text}). Strongest signals outweighed any weak spots.'
+        elif status == 'warn':
+            status_explanation = f'Scored {score:.0%}, landing in warn range ({threshold_text}). Review the weaker signal around {weakest_metric}.'
+        else:
+            status_explanation = f'Scored {score:.0%}, landing in fail range ({threshold_text}). Follow up on the weaker signal around {weakest_metric}.'
         return {
             'id': row[0],
             'session_id': row[1],
             'timestamp': row[2],
             'target_trace_id': row[3],
             'label': row[4],
-            'score': row[5],
-            'status': row[6],
-            'metrics': json.loads(row[7]) if row[7] else {},
-            'notes': json.loads(row[8]) if row[8] else [],
+            'score': score,
+            'status': status,
+            'metrics': metrics,
+            'notes': notes,
+            'status_explanation': status_explanation,
+            'score_band': score_band,
         }
 
 
@@ -339,6 +382,7 @@ class TraceApiHandler(BaseHTTPRequestHandler):
             tag = query.get('tag', [None])[0]
             search = query.get('search', [None])[0]
             include_evaluations = bool(self._parse_bool(query.get('include_evaluations', ['false'])[0]))
+            sort = query.get('sort', ['asc'])[0]
             self._write_json(
                 self.repository.list_traces(
                     session_id=session_id,
@@ -348,6 +392,7 @@ class TraceApiHandler(BaseHTTPRequestHandler):
                     limit=limit,
                     offset=offset,
                     include_evaluations=include_evaluations,
+                    sort=sort,
                 )
             )
             return
@@ -357,6 +402,7 @@ class TraceApiHandler(BaseHTTPRequestHandler):
             session_id = query.get('session_id', [None])[0]
             status = query.get('status', [None])[0]
             target_trace_id = query.get('target_trace_id', [None])[0]
+            sort = query.get('sort', ['desc'])[0]
             self._write_json(
                 self.repository.list_evaluations(
                     session_id=session_id,
@@ -364,6 +410,7 @@ class TraceApiHandler(BaseHTTPRequestHandler):
                     target_trace_id=target_trace_id,
                     limit=limit,
                     offset=offset,
+                    sort=sort,
                 )
             )
             return

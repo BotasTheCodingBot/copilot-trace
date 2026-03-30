@@ -8,6 +8,10 @@ export interface Trace {
   function_name?: string
   tags?: string[] | null
   notes?: string | null
+  sequence?: number
+  sequence_id?: string
+  parent_trace_id?: string | null
+  parent_reason?: string | null
   [key: string]: any
 }
 
@@ -21,6 +25,8 @@ export interface Evaluation {
   status: 'pass' | 'warn' | 'fail' | string
   metrics: Record<string, number>
   notes: string[]
+  status_explanation?: string
+  score_band?: 'excellent' | 'strong' | 'needs_review' | 'high_risk' | string
 }
 
 export interface EvaluationSessionSummary {

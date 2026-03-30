@@ -20,6 +20,8 @@ class EvaluationRow:
     status: str
     metrics: dict[str, float]
     notes: list[str]
+    status_explanation: str
+    score_band: str
 
 
 class TraceEvaluator:
@@ -94,6 +96,8 @@ class TraceEvaluator:
             'status': evaluation.status,
             'metrics': evaluation.metrics,
             'notes': evaluation.notes,
+            'status_explanation': evaluation.status_explanation,
+            'score_band': evaluation.score_band,
         }
 
     def _evaluate_assistant_turn(self, row: TraceRow, related_rows: list[TraceRow]) -> EvaluationRow:
@@ -137,6 +141,8 @@ class TraceEvaluator:
             notes.append('Balanced response with usable trace signal.')
 
         status = 'pass' if score >= 0.75 else 'warn' if score >= 0.5 else 'fail'
+        score_band = self._score_band(score)
+        status_explanation = self._status_explanation(status, score, weighted, notes)
         return EvaluationRow(
             id=f'eval:{row.id}',
             session_id=row.session_id,
@@ -147,7 +153,30 @@ class TraceEvaluator:
             status=status,
             metrics=weighted,
             notes=notes,
+            status_explanation=status_explanation,
+            score_band=score_band,
         )
+
+
+    def _score_band(self, score: float) -> str:
+        if score >= 0.9:
+            return 'excellent'
+        if score >= 0.75:
+            return 'strong'
+        if score >= 0.5:
+            return 'needs_review'
+        return 'high_risk'
+
+    def _status_explanation(self, status: str, score: float, metrics: dict[str, float], notes: list[str]) -> str:
+        thresholds = 'pass ≥ 75%, warn ≥ 50%, fail < 50%'
+        weakest_metric = min(metrics.items(), key=lambda item: item[1])[0].replace('_', ' ')
+        strongest_metric = max(metrics.items(), key=lambda item: item[1])[0].replace('_', ' ')
+        summary_note = notes[0] if notes else 'No evaluator note recorded.'
+        if status == 'pass':
+            return f'Scored {score:.0%}, which lands in pass territory ({thresholds}). Strongest signal: {strongest_metric}. Main note: {summary_note}'
+        if status == 'warn':
+            return f'Scored {score:.0%}, which lands in warn territory ({thresholds}). Review recommended because the weakest signal was {weakest_metric}. Main note: {summary_note}'
+        return f'Scored {score:.0%}, which lands in fail territory ({thresholds}). Immediate follow-up suggested because the weakest signal was {weakest_metric}. Main note: {summary_note}'
 
     def _status_value(self, value: Any) -> int | None:
         if isinstance(value, bool):

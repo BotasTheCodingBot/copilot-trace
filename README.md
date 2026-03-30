@@ -21,8 +21,11 @@ Copilot exports are messy, deeply nested, and annoying to inspect by hand. `copi
 ## Feature highlights
 - recursive decoding of nested tool payloads and `ValueContainer` blobs
 - persisted storage config in `out/copilot-trace-config.json`
-- API-backed filtering, paging, and trace annotation writes
-- trace-level evaluation context surfaced directly in the UI
+- API-backed filtering, paging, timeline sort order, parent/sequence metadata, and trace annotation writes
+- trace-level evaluation context surfaced directly in the UI, including score bands and status explanations
+- clickable trace tree on the Parser page so message → tool call → tool result flows are easier to follow
+- branch expand/collapse controls plus labeled edges (`invokes`, `returns`, etc.) so dense sessions stay readable
+- full-screen trace detail view for inspecting long payloads without fighting the sidebar layout
 - hash-based page routing (`#/parser`, `#/evaluation`, `#/dashboard`) so direct links survive static hosting
 - sample fallback data loaded as a separate asset instead of being bundled into the main JS chunk
 
@@ -109,7 +112,7 @@ cd ui
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-Open <http://localhost:5173/#/parser>.
+Open <http://localhost:5173/#/parser>. The Parser page now includes both the paged timeline and a trace tree that mirrors parent/child execution flow. Tree branches can be collapsed/expanded, edge labels explain the relationship between nodes, and the selected trace can be opened in a dedicated full-screen detail view.
 
 ## UI routes
 The UI uses hash routes so you can deep-link without needing server-side rewrite rules:
@@ -177,4 +180,4 @@ This repo is close to “shareable side-project” territory, but a couple of pu
 - UI dependency versions are locked in `ui/package-lock.json`.
 
 ## Screenshots
-Current captures live in `screenshots/`.
+Current captures live in `screenshots/`, including `trace-tree-parser-page.png` for the parser tree view.

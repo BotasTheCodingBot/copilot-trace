@@ -64,6 +64,8 @@ class CopilotParserTests(unittest.TestCase):
             self.assertIn('function', first)
             self.assertIn('trace_type', first)
             self.assertIn('function_name', first)
+            self.assertIn('sequence', first)
+            self.assertIn('parent_trace_id', first)
 
     def test_recursive_tool_payload_decoding(self):
         nested_payload = {
@@ -102,6 +104,8 @@ class CopilotParserTests(unittest.TestCase):
                 first_trace = traces_payload['traces'][0]
                 self.assertIn('trace_type', first_trace)
                 self.assertIn('function_name', first_trace)
+                self.assertIn('sequence', first_trace)
+                self.assertIn('parent_trace_id', first_trace)
                 self.assertIn('evaluations', traces_payload)
 
                 filter_payload = json.loads(urlopen(f"{base_url}/api/traces?session_id={session_id}&type={first_trace['trace_type']}&tag=copilot&search={first_trace['function_name']}").read().decode('utf-8'))
@@ -122,6 +126,16 @@ class CopilotParserTests(unittest.TestCase):
                 self.assertGreater(eval_payload['count'], 0)
                 self.assertGreaterEqual(eval_payload['total'], eval_payload['count'])
                 self.assertIn('score', eval_payload['evaluations'][0])
+                self.assertIn('status_explanation', eval_payload['evaluations'][0])
+                self.assertIn('score_band', eval_payload['evaluations'][0])
+
+                asc_traces_payload = json.loads(urlopen(f'{base_url}/api/traces?session_id={session_id}&limit=5&offset=0&sort=asc').read().decode('utf-8'))
+                desc_traces_payload = json.loads(urlopen(f'{base_url}/api/traces?session_id={session_id}&limit=5&offset=0&sort=desc').read().decode('utf-8'))
+                self.assertNotEqual(asc_traces_payload['traces'][0]['id'], desc_traces_payload['traces'][0]['id'])
+
+                asc_eval_payload = json.loads(urlopen(f'{base_url}/api/evaluations?session_id={session_id}&limit=5&offset=0&sort=asc').read().decode('utf-8'))
+                desc_eval_payload = json.loads(urlopen(f'{base_url}/api/evaluations?session_id={session_id}&limit=5&offset=0&sort=desc').read().decode('utf-8'))
+                self.assertNotEqual(asc_eval_payload['evaluations'][0]['id'], desc_eval_payload['evaluations'][0]['id'])
 
                 eval_sessions_payload = json.loads(urlopen(f'{base_url}/api/evaluations/sessions').read().decode('utf-8'))
                 self.assertGreaterEqual(eval_sessions_payload['count'], 1)
@@ -130,6 +144,8 @@ class CopilotParserTests(unittest.TestCase):
                 trace_payload = json.loads(urlopen(f"{base_url}/api/traces/{first_trace['id']}").read().decode('utf-8'))
                 self.assertEqual(trace_payload['id'], first_trace['id'])
                 self.assertEqual(trace_payload['notes'], 'Needs follow-up')
+                self.assertIn('sequence', trace_payload)
+                self.assertIn('parent_trace_id', trace_payload)
             finally:
                 server.shutdown()
                 server.server_close()

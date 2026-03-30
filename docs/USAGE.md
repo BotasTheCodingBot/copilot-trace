@@ -42,8 +42,10 @@
    - The UI will fetch the latest sessions/traces/evaluations from the live API. No need to rebuild the UI after each parse unless you want a fresh bundle.
 
 5. **Annotate & explore**
-   - Use the Parser page to search traces, add tags/notes (PATCH persists to `/api/traces/:id`).
-   - The Evaluation page surfaces heuristic scores per session/trace.
+   - Use the Parser page to search traces, switch timeline sort order, and add tags/notes (PATCH persists to `/api/traces/:id`).
+   - The trace tree now supports branch expand/collapse controls, and edge badges label common relationships like tool invocation/result flow.
+   - Use **Full-screen trace** on the selected trace card when you need to inspect a long payload or linkage metadata without the sidebar squeezing the JSON viewer.
+   - The Evaluation page surfaces heuristic scores per session/trace plus explicit status explanations, score bands, and sortable history.
    - Dashboard shows aggregated metrics and the latest evaluation triage.
 
 6. **Automated usage**
@@ -56,4 +58,5 @@
 - If you want to inspect a specific Copilot conversation, copy the session folder into `copilot-logs/Okonomi/copilot-chat/<trace>/sessions` and rerun the CLI ingestion.
 - The CLI config file (`out/copilot-trace-config.json`) helps you reuse paths in subsequent runs.
 - Hash routes (`#/parser`, `#/evaluation`, `#/dashboard`) let you link directly to each page.
+- `/api/traces` and `/api/evaluations` now accept `sort=asc|desc` so UI state and direct API calls stay aligned.
 - For continuous automation, hook `make ingest` into your CI so new `.mpack` logs are parsed before the UI starts.

@@ -6,6 +6,8 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogContent,
   Divider,
   LinearProgress,
   List,
@@ -15,14 +17,23 @@ import {
   Pagination,
   Paper,
   Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
   TextField,
   Typography,
 } from '@mui/material'
 import AutoGraphRoundedIcon from '@mui/icons-material/AutoGraphRounded'
 import DashboardRoundedIcon from '@mui/icons-material/DashboardRounded'
+import DifferenceRoundedIcon from '@mui/icons-material/DifferenceRounded'
+import DownloadRoundedIcon from '@mui/icons-material/DownloadRounded'
+import OpenInFullRoundedIcon from '@mui/icons-material/OpenInFullRounded'
 import TimelineRoundedIcon from '@mui/icons-material/TimelineRounded'
-import TraceVisualizer from './components/TraceVisualizer'
+import TraceTree from './components/TraceTree'
 import JsonViewer from './components/JsonViewer'
+import { diffTraceObjects } from './components/traceTreeUtils'
 import type {
   Evaluation,
   EvaluationListResponse,
@@ -107,9 +118,63 @@ const toneForStatus = (status: string) => {
 
 const pct = (value: number | undefined | null) => value == null ? '—' : `${Math.round(value * 100)}%`
 const safeText = (trace: Trace) => String(trace.text ?? trace.state ?? trace.description ?? trace.timestamp ?? '')
+const formatMetricLabel = (metric: string) => metric.replace(/_/g, ' ')
+const describeEvalStatus = (evaluation: Evaluation) => {
+  if (evaluation.status_explanation) return evaluation.status_explanation
+  const weakestMetric = Object.entries(evaluation.metrics).sort((a, b) => a[1] - b[1])[0]?.[0]
+  const weakestLabel = weakestMetric ? formatMetricLabel(weakestMetric) : 'unknown signal'
+  if (evaluation.status === 'pass') return `Scored ${pct(evaluation.score)}, so it passed the current rubric (pass ≥ 75%).`
+  if (evaluation.status === 'warn') return `Scored ${pct(evaluation.score)}, so it landed in review territory (warn ≥ 50%). Weakest signal: ${weakestLabel}.`
+  return `Scored ${pct(evaluation.score)}, so it failed the current rubric (< 50%). Weakest signal: ${weakestLabel}.`
+}
+
+const enrichTraces = (input: Trace[]): Trace[] => {
+  const grouped = new Map<string, Trace[]>()
+  input.forEach((trace) => {
+    const sessionId = trace.session_id ?? ''
+    grouped.set(sessionId, [...(grouped.get(sessionId) ?? []), trace])
+  })
+
+  const enriched: Trace[] = []
+  for (const [sessionId, traces] of grouped.entries()) {
+    const sorted = [...traces].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id))
+    const messageMap = new Map(sorted.filter((trace) => trace.message_id).map((trace) => [String(trace.message_id), trace.id]))
+    const toolMap = new Map(sorted.filter((trace) => trace.tool_call_id && trace.type === 'TOOL_CALL').map((trace) => [String(trace.tool_call_id), trace.id]))
+    sorted.forEach((trace, index) => {
+      let parentTraceId: string | null = trace.parent_trace_id ?? null
+      let parentReason: string | null = trace.parent_reason ?? null
+      if (!parentTraceId && trace.type === 'TOOL_CALL') {
+        parentTraceId = messageMap.get(String(trace.message_id ?? '')) ?? null
+        parentReason = parentTraceId ? 'message' : null
+      }
+      if (!parentTraceId && trace.type === 'TOOL_RESULT') {
+        parentTraceId = toolMap.get(String(trace.tool_call_id ?? '')) ?? null
+        parentReason = parentTraceId ? 'tool_call' : null
+      }
+      enriched.push({
+        ...trace,
+        sequence: trace.sequence ?? index + 1,
+        sequence_id: trace.sequence_id ?? `${sessionId}:${index + 1}`,
+        parent_trace_id: parentTraceId,
+        parent_reason: parentReason,
+      })
+    })
+  }
+  return enriched
+}
+
+function downloadJson(filename: string, payload: unknown) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
 
 function toSampleState(bundle: TraceBundle): SampleState {
-  const traces = bundle.traces ?? []
+  const traces = enrichTraces(bundle.traces ?? [])
   const evaluationSessions = bundle.evaluation_sessions ?? []
   const evaluations = bundle.evaluations ?? []
   const sessions: TraceSessionSummary[] = Array.from(new Set(traces.map((trace) => trace.session_id))).map((session_id) => ({
@@ -185,6 +250,7 @@ export default function App() {
   const [sessionAnnotatedOnly, setSessionAnnotatedOnly] = useState(false)
 
   const [traces, setTraces] = useState<Trace[]>([])
+  const [treeTraces, setTreeTraces] = useState<Trace[]>([])
   const [tracesTotal, setTracesTotal] = useState(0)
   const [tracePage, setTracePage] = useState(1)
   const [availableTypes, setAvailableTypes] = useState<string[]>([])
@@ -193,9 +259,12 @@ export default function App() {
   const [evaluations, setEvaluations] = useState<Evaluation[]>([])
   const [sessionEvaluations, setSessionEvaluations] = useState<EvaluationSessionSummary[]>([])
   const [evaluationStatusFilter, setEvaluationStatusFilter] = useState('all')
+  const [traceSort, setTraceSort] = useState<'asc' | 'desc'>('asc')
+  const [evaluationSort, setEvaluationSort] = useState<'desc' | 'asc'>('desc')
 
   const [selectedSession, setSelectedSession] = useState('')
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
+  const [compareTraceId, setCompareTraceId] = useState<string>('')
   const [search, setSearch] = useState('')
   const [draftSearch, setDraftSearch] = useState('')
   const [selectedType, setSelectedType] = useState('all')
@@ -204,10 +273,12 @@ export default function App() {
   const [noteDraft, setNoteDraft] = useState('')
   const [loadingSessions, setLoadingSessions] = useState(true)
   const [loadingTraces, setLoadingTraces] = useState(true)
+  const [loadingTree, setLoadingTree] = useState(true)
   const [loadingEvaluations, setLoadingEvaluations] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [sourceLabel, setSourceLabel] = useState('live API')
+  const [traceViewOpen, setTraceViewOpen] = useState(false)
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -216,6 +287,8 @@ export default function App() {
     const nextType = params.get('type') ?? 'all'
     const nextTag = params.get('tag') ?? 'all'
     const nextEvalStatus = params.get('eval') ?? 'all'
+    const nextTraceSort = (params.get('traceSort') ?? 'asc') === 'desc' ? 'desc' : 'asc'
+    const nextEvaluationSort = (params.get('evaluationSort') ?? 'desc') === 'asc' ? 'asc' : 'desc'
     const nextSessionPage = Number(params.get('sessionPage') ?? '1')
     const nextTracePage = Number(params.get('tracePage') ?? '1')
 
@@ -225,6 +298,8 @@ export default function App() {
     setSelectedType(nextType)
     setSelectedTag(nextTag)
     setEvaluationStatusFilter(nextEvalStatus)
+    setTraceSort(nextTraceSort)
+    setEvaluationSort(nextEvaluationSort)
     setSessionPage(Number.isFinite(nextSessionPage) && nextSessionPage > 0 ? nextSessionPage : 1)
     setTracePage(Number.isFinite(nextTracePage) && nextTracePage > 0 ? nextTracePage : 1)
 
@@ -244,11 +319,13 @@ export default function App() {
     if (selectedType !== 'all') params.set('type', selectedType)
     if (selectedTag !== 'all') params.set('tag', selectedTag)
     if (evaluationStatusFilter !== 'all') params.set('eval', evaluationStatusFilter)
+    if (traceSort !== 'asc') params.set('traceSort', traceSort)
+    if (evaluationSort !== 'desc') params.set('evaluationSort', evaluationSort)
     if (sessionPage > 1) params.set('sessionPage', String(sessionPage))
     if (tracePage > 1) params.set('tracePage', String(tracePage))
     const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}#${pagePath(page)}`
     window.history.replaceState({}, '', nextUrl)
-  }, [page, selectedSession, search, selectedType, selectedTag, evaluationStatusFilter, sessionPage, tracePage])
+  }, [page, selectedSession, search, selectedType, selectedTag, evaluationStatusFilter, traceSort, evaluationSort, sessionPage, tracePage])
 
   const loadSampleState = async (): Promise<SampleState> => {
     if (sampleReady) return sampleState
@@ -320,6 +397,45 @@ export default function App() {
   useEffect(() => {
     if (!selectedSession) return
     let cancelled = false
+    const loadTree = async () => {
+      setLoadingTree(true)
+      try {
+        const params = new URLSearchParams({ session_id: selectedSession, sort: traceSort })
+        if (selectedType !== 'all') params.set('type', selectedType)
+        if (selectedTag !== 'all') params.set('tag', selectedTag)
+        if (search.trim()) params.set('search', search.trim())
+        const response = await fetch(`${API_BASE}/api/traces?${params.toString()}`)
+        if (!response.ok) throw new Error('Tree query failed')
+        const payload = await response.json() as TraceListResponse
+        if (cancelled) return
+        setTreeTraces(enrichTraces(payload.traces ?? []))
+      } catch {
+        if (cancelled) return
+        const fallback = sampleReady ? sampleState : await loadSampleState()
+        const filtered = enrichTraces(fallback.traces).filter((trace) => {
+          if (trace.session_id !== selectedSession) return false
+          if (selectedType !== 'all' && trace.type !== selectedType) return false
+          if (selectedTag !== 'all' && !(trace.tags ?? []).includes(selectedTag)) return false
+          if (search.trim()) {
+            const haystack = JSON.stringify(trace).toLowerCase()
+            if (!haystack.includes(search.trim().toLowerCase())) return false
+          }
+          return true
+        }).sort((a, b) => traceSort === 'asc'
+          ? (a.sequence ?? Number.MAX_SAFE_INTEGER) - (b.sequence ?? Number.MAX_SAFE_INTEGER) || a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id)
+          : (b.sequence ?? Number.MAX_SAFE_INTEGER) - (a.sequence ?? Number.MAX_SAFE_INTEGER) || b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id))
+        setTreeTraces(filtered)
+      } finally {
+        if (!cancelled) setLoadingTree(false)
+      }
+    }
+    loadTree()
+    return () => { cancelled = true }
+  }, [selectedSession, selectedType, selectedTag, search, traceSort, sampleReady])
+
+  useEffect(() => {
+    if (!selectedSession) return
+    let cancelled = false
     const loadTracesAndEvaluations = async () => {
       setLoadingTraces(true)
       setLoadingEvaluations(true)
@@ -333,8 +449,9 @@ export default function App() {
         if (selectedType !== 'all') traceParams.set('type', selectedType)
         if (selectedTag !== 'all') traceParams.set('tag', selectedTag)
         if (search.trim()) traceParams.set('search', search.trim())
+        traceParams.set('sort', traceSort)
 
-        const evalParams = new URLSearchParams({ session_id: selectedSession, limit: String(EVAL_PAGE_SIZE) })
+        const evalParams = new URLSearchParams({ session_id: selectedSession, limit: String(EVAL_PAGE_SIZE), sort: evaluationSort })
         if (evaluationStatusFilter !== 'all') evalParams.set('status', evaluationStatusFilter)
 
         const [traceRes, evalRes] = await Promise.all([
@@ -345,7 +462,7 @@ export default function App() {
         const tracePayload = await traceRes.json() as TraceListResponse
         const evalPayload = await evalRes.json() as EvaluationListResponse
         if (cancelled) return
-        const nextTraces = tracePayload.traces ?? []
+        const nextTraces = enrichTraces(tracePayload.traces ?? [])
         setTraces(nextTraces)
         setTracesTotal(tracePayload.total ?? nextTraces.length)
         setAvailableTypes(tracePayload.available_filters?.types ?? [])
@@ -355,7 +472,7 @@ export default function App() {
       } catch {
         if (cancelled) return
         const fallback = sampleReady ? sampleState : await loadSampleState()
-        const filtered = fallback.traces.filter((trace) => {
+        const filtered = enrichTraces(fallback.traces).filter((trace) => {
           if (trace.session_id !== selectedSession) return false
           if (selectedType !== 'all' && trace.type !== selectedType) return false
           if (selectedTag !== 'all' && !(trace.tags ?? []).includes(selectedTag)) return false
@@ -364,12 +481,16 @@ export default function App() {
             if (!haystack.includes(search.trim().toLowerCase())) return false
           }
           return true
-        })
+        }).sort((a, b) => traceSort === 'asc'
+          ? a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id)
+          : b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id))
         const fallbackEvaluations = fallback.evaluations.filter((item) => {
           if (item.session_id !== selectedSession) return false
           if (evaluationStatusFilter !== 'all' && item.status !== evaluationStatusFilter) return false
           return true
-        })
+        }).sort((a, b) => evaluationSort === 'asc'
+          ? a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id)
+          : b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id))
         const start = (tracePage - 1) * TRACE_PAGE_SIZE
         const paged = filtered.slice(start, start + TRACE_PAGE_SIZE)
         setTraces(paged)
@@ -387,17 +508,34 @@ export default function App() {
     }
     loadTracesAndEvaluations()
     return () => { cancelled = true }
-  }, [selectedSession, tracePage, selectedType, selectedTag, search, evaluationStatusFilter, sampleReady])
+  }, [selectedSession, tracePage, selectedType, selectedTag, search, evaluationStatusFilter, traceSort, evaluationSort, sampleReady])
 
   useEffect(() => {
     setTracePage(1)
   }, [selectedSession, selectedType, selectedTag, search])
 
-  const selectedTrace = useMemo(() => traces.find((trace) => trace.id === selectedTraceId) ?? traces[0] ?? null, [traces, selectedTraceId])
+  const selectedTrace = useMemo(() => {
+    const activeTraces = treeTraces.length ? treeTraces : traces
+    return activeTraces.find((trace) => trace.id === selectedTraceId) ?? traces.find((trace) => trace.id === selectedTraceId) ?? activeTraces[0] ?? traces[0] ?? null
+  }, [treeTraces, traces, selectedTraceId])
+  const compareTrace = useMemo(() => {
+    if (!compareTraceId) return null
+    const activeTraces = treeTraces.length ? treeTraces : traces
+    return activeTraces.find((trace) => trace.id === compareTraceId) ?? traces.find((trace) => trace.id === compareTraceId) ?? null
+  }, [compareTraceId, treeTraces, traces])
+  const traceDiff = useMemo(() => (
+    selectedTrace && compareTrace ? diffTraceObjects(compareTrace, selectedTrace, 60) : []
+  ), [compareTrace, selectedTrace])
   useEffect(() => {
     setTagDraft((selectedTrace?.tags ?? []).join(', '))
     setNoteDraft(selectedTrace?.notes ?? '')
   }, [selectedTrace?.id])
+
+  useEffect(() => {
+    if (!compareTraceId) return
+    const available = [...treeTraces, ...traces].some((trace) => trace.id === compareTraceId)
+    if (!available || compareTraceId === selectedTraceId) setCompareTraceId('')
+  }, [compareTraceId, selectedTraceId, treeTraces, traces])
 
   const evaluation = useMemo(() => sessionEvaluations.find((item) => item.session_id === selectedSession), [sessionEvaluations, selectedSession])
   const evaluationByTraceId = useMemo(() => new Map(evaluations.map((item) => [item.target_trace_id, item])), [evaluations])
@@ -448,15 +586,37 @@ export default function App() {
       if (!response.ok) throw new Error('PATCH failed')
       const updated = await response.json() as Trace
       setTraces((current) => current.map((trace) => trace.id === updated.id ? updated : trace))
+      setTreeTraces((current) => current.map((trace) => trace.id === updated.id ? { ...trace, ...updated } : trace))
       setSelectedTraceId(updated.id)
       setError(null)
     } catch (err) {
       const updated = { ...selectedTrace, tags, notes: nextNotes }
       setTraces((current) => current.map((trace) => trace.id === updated.id ? updated : trace))
+      setTreeTraces((current) => current.map((trace) => trace.id === updated.id ? { ...trace, ...updated } : trace))
       setError(`Saved only in local UI state because the API write failed. ${(err as Error).message}`)
     } finally {
       setSaving(false)
     }
+  }
+
+  const exportSelectedTrace = () => {
+    if (!selectedTrace) return
+    downloadJson(`trace-${selectedTrace.id}.json`, selectedTrace)
+  }
+
+  const exportFilteredSession = () => {
+    downloadJson(`session-${selectedSession || 'traces'}.json`, {
+      session_id: selectedSession,
+      filters: {
+        search,
+        type: selectedType,
+        tag: selectedTag,
+        traceSort,
+        evaluationStatusFilter,
+      },
+      traces: treeTraces,
+      evaluations,
+    })
   }
 
   const renderParserPage = () => (
@@ -476,6 +636,10 @@ export default function App() {
             <MenuItem value="all">All tags</MenuItem>
             {availableTags.map((tag) => <MenuItem key={tag} value={tag}>{tag}</MenuItem>)}
           </TextField>
+          <TextField select label="Timeline sort" size="small" value={traceSort} onChange={(event) => { setTracePage(1); setTraceSort(event.target.value as 'asc' | 'desc') }} sx={{ minWidth: 180 }}>
+            <MenuItem value="asc">Oldest first</MenuItem>
+            <MenuItem value="desc">Newest first</MenuItem>
+          </TextField>
           <Button variant="contained" onClick={() => { setTracePage(1); setSearch(draftSearch) }}>Apply</Button>
         </Stack>
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
@@ -484,6 +648,7 @@ export default function App() {
           ))}
           {search ? <Chip label={`Search: ${search}`} onDelete={() => { setSearch(''); setDraftSearch('') }} /> : null}
           <Chip label={`Page ${tracePage}/${Math.max(1, Math.ceil(tracesTotal / TRACE_PAGE_SIZE))}`} variant="outlined" />
+          <Chip label={`Sort: ${traceSort === 'asc' ? 'oldest first' : 'newest first'}`} variant="outlined" />
           <Chip label={`${tracesTotal} total matches`} variant="outlined" />
           <Chip label={`Session ${selectedSession || '—'}`} variant="outlined" />
         </Stack>
@@ -517,18 +682,21 @@ export default function App() {
         </SectionCard>
 
         <Stack sx={{ flex: 1.15 }} spacing={3}>
+          <TraceTree traces={treeTraces} selectedTraceId={selectedTrace?.id ?? null} onSelect={setSelectedTraceId} title={loadingTree ? 'Trace tree · loading…' : 'Trace tree'} />
           <SectionCard title="Selected trace" description="Trace payload, annotations, and evaluation context stay together so review work is less annoying.">
             {selectedTrace ? (
               <>
                 <Stack direction="row" spacing={1} mb={1} flexWrap="wrap" useFlexGap>
                   <Chip size="small" label={selectedTrace.type} color={toneForType(selectedTrace.type) as any} />
                   <Chip size="small" label={selectedTrace.function} variant="outlined" />
+                  <Chip size="small" label={`Seq ${selectedTrace.sequence ?? '—'}`} variant="outlined" />
+                  {selectedTrace.parent_trace_id ? <Chip size="small" label={`Parent ${selectedTrace.parent_reason ?? 'trace'} · ${selectedTrace.parent_trace_id}`} variant="outlined" /> : <Chip size="small" label="Root trace" variant="outlined" />}
                   <Chip size="small" label={new Date(selectedTrace.timestamp).toLocaleString()} variant="outlined" />
                   {selectedEvaluation ? <Chip size="small" label={`Eval ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} variant="outlined" /> : null}
                 </Stack>
 
                 <Paper elevation={0} sx={{ p: 2, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
-                  <Typography variant="subtitle2" fontWeight={700} gutterBottom>Tags & notes</Typography>
+                  <Typography variant="subtitle2" fontWeight={700} gutterBottom>Tags, export & notes</Typography>
                   <Stack spacing={1.5}>
                     <TextField label="Tags" helperText="Comma-separated. Persisted via PATCH /api/traces/:id." size="small" value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} />
                     <TextField label="Notes" multiline minRows={3} value={noteDraft} onChange={(event) => setNoteDraft(event.target.value)} placeholder="Why this trace matters, what looks risky, or what to revisit later." />
@@ -536,8 +704,72 @@ export default function App() {
                       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                         {(selectedTrace.tags ?? []).map((tag) => <Chip key={tag} size="small" label={tag} variant="outlined" />)}
                       </Stack>
-                      <Button variant="contained" onClick={saveAnnotations} disabled={saving} startIcon={saving ? <CircularProgress size={16} color="inherit" /> : undefined}>Save annotation</Button>
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                        <Button variant="outlined" onClick={exportSelectedTrace} startIcon={<DownloadRoundedIcon />}>Export trace</Button>
+                        <Button variant="outlined" onClick={exportFilteredSession} startIcon={<DownloadRoundedIcon />}>Export session slice</Button>
+                        <Button variant="outlined" onClick={() => setTraceViewOpen(true)} startIcon={<OpenInFullRoundedIcon />}>Full-screen trace</Button>
+                        <Button variant="contained" onClick={saveAnnotations} disabled={saving} startIcon={saving ? <CircularProgress size={16} color="inherit" /> : undefined}>Save annotation</Button>
+                      </Stack>
                     </Stack>
+                  </Stack>
+                </Paper>
+
+                <Paper elevation={0} sx={{ p: 2, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
+                  <Stack spacing={1.5}>
+                    <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
+                      <Box>
+                        <Typography variant="subtitle2" fontWeight={700}>Diff tool</Typography>
+                        <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)' }}>
+                          Compare this trace against another trace in the current filtered session slice and export whichever payloads you need.
+                        </Typography>
+                      </Box>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
+                        <TextField
+                          select
+                          size="small"
+                          label="Compare against"
+                          value={compareTraceId}
+                          onChange={(event) => setCompareTraceId(event.target.value)}
+                          sx={{ minWidth: 280 }}
+                        >
+                          <MenuItem value="">None</MenuItem>
+                          {treeTraces.filter((trace) => trace.id !== selectedTrace.id).map((trace) => (
+                            <MenuItem key={trace.id} value={trace.id}>{`${trace.sequence ?? '—'} · ${trace.function} · ${trace.type}`}</MenuItem>
+                          ))}
+                        </TextField>
+                        <Button variant="outlined" disabled={!compareTrace} onClick={() => compareTrace && downloadJson(`trace-diff-${compareTrace.id}-vs-${selectedTrace.id}.json`, { base: compareTrace, target: selectedTrace, diff: traceDiff })} startIcon={<DifferenceRoundedIcon />}>Export diff</Button>
+                      </Stack>
+                    </Stack>
+
+                    {compareTrace ? (
+                      <>
+                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                          <Chip size="small" label={`Base ${compareTrace.function}`} variant="outlined" />
+                          <Chip size="small" label={`Target ${selectedTrace.function}`} variant="outlined" />
+                          <Chip size="small" label={`${traceDiff.length} diff ${traceDiff.length === 1 ? 'entry' : 'entries'}`} color={traceDiff.length ? 'warning' : 'success'} variant="outlined" />
+                        </Stack>
+                        {traceDiff.length ? (
+                          <Table size="small" sx={{ '& td, & th': { borderColor: 'rgba(160,185,255,0.1)', verticalAlign: 'top' } }}>
+                            <TableHead>
+                              <TableRow>
+                                <TableCell>Path</TableCell>
+                                <TableCell>Base</TableCell>
+                                <TableCell>Target</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {traceDiff.slice(0, 12).map((entry) => (
+                                <TableRow key={entry.path}>
+                                  <TableCell sx={{ whiteSpace: 'nowrap', color: '#8be0b8' }}>{entry.path}</TableCell>
+                                  <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem', wordBreak: 'break-word' }}>{JSON.stringify(entry.left)}</TableCell>
+                                  <TableCell sx={{ fontFamily: 'monospace', fontSize: '0.8rem', wordBreak: 'break-word' }}>{JSON.stringify(entry.right)}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        ) : <Alert severity="success" variant="outlined">These traces serialize the same under the current diff rules.</Alert>}
+                      </>
+                    ) : <Alert severity="info" variant="outlined">Choose another trace to see a field-level diff.</Alert>}
                   </Stack>
                 </Paper>
 
@@ -548,10 +780,14 @@ export default function App() {
                       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                         <Chip size="small" label={selectedEvaluation.label} variant="outlined" />
                         <Chip size="small" label={`Score ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} />
+                        <Chip size="small" label={`Band ${selectedEvaluation.score_band ?? 'derived'}`} variant="outlined" />
                         {Object.entries(selectedEvaluation.metrics).map(([metric, value]) => (
-                          <Chip key={metric} size="small" label={`${metric.replace(/_/g, ' ')} · ${pct(value)}`} variant="outlined" />
+                          <Chip key={metric} size="small" label={`${formatMetricLabel(metric)} · ${pct(value)}`} variant="outlined" />
                         ))}
                       </Stack>
+                      <Alert severity={selectedEvaluation.status === 'pass' ? 'success' : selectedEvaluation.status === 'warn' ? 'warning' : 'error'} variant="outlined">
+                        {describeEvalStatus(selectedEvaluation)}
+                      </Alert>
                       {selectedEvaluation.notes.map((note) => (
                         <Typography key={note} variant="body2" sx={{ color: 'rgba(228,235,255,0.72)' }}>• {note}</Typography>
                       ))}
@@ -559,7 +795,6 @@ export default function App() {
                   </Paper>
                 ) : null}
 
-                <TraceVisualizer data={selectedTrace} title="Trace graph" />
                 <JsonViewer data={selectedTrace} title="Trace payload" maxHeight={420} />
               </>
             ) : <Typography>No trace selected.</Typography>}
@@ -590,6 +825,10 @@ export default function App() {
                 <MenuItem value="pass">Pass</MenuItem>
                 <MenuItem value="warn">Warn</MenuItem>
                 <MenuItem value="fail">Fail</MenuItem>
+              </TextField>
+              <TextField select label="Eval sort" size="small" value={evaluationSort} onChange={(event) => setEvaluationSort(event.target.value as 'desc' | 'asc')} sx={{ minWidth: 180 }}>
+                <MenuItem value="desc">Newest first</MenuItem>
+                <MenuItem value="asc">Oldest first</MenuItem>
               </TextField>
               <Chip label={`${evaluations.length} evaluations loaded`} variant="outlined" sx={{ alignSelf: 'center' }} />
             </Stack>
@@ -627,10 +866,14 @@ export default function App() {
                       </Stack>
                     </Stack>
                     <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 1.25 }}>
+                      <Chip size="small" label={`Band ${item.score_band ?? 'derived'}`} variant="outlined" />
                       {Object.entries(item.metrics).map(([metric, value]) => (
-                        <Chip key={metric} size="small" label={`${metric.replace(/_/g, ' ')} · ${pct(value)}`} variant="outlined" />
+                        <Chip key={metric} size="small" label={`${formatMetricLabel(metric)} · ${pct(value)}`} variant="outlined" />
                       ))}
                     </Stack>
+                    <Alert severity={item.status === 'pass' ? 'success' : item.status === 'warn' ? 'warning' : 'error'} variant="outlined" sx={{ mt: 1.25 }}>
+                      {describeEvalStatus(item)}
+                    </Alert>
                     {item.notes.length ? (
                       <Stack spacing={0.5} sx={{ mt: 1.25 }}>
                         {item.notes.map((note) => (
@@ -653,10 +896,14 @@ export default function App() {
               <Chip size="small" label={`Score ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} />
               <Chip size="small" label={selectedTrace?.function ?? 'selected trace'} variant="outlined" />
               <Chip size="small" label={selectedEvaluation.label} variant="outlined" />
+              <Chip size="small" label={`Band ${selectedEvaluation.score_band ?? 'derived'}`} variant="outlined" />
             </Stack>
+            <Alert severity={selectedEvaluation.status === 'pass' ? 'success' : selectedEvaluation.status === 'warn' ? 'warning' : 'error'} variant="outlined">
+              {describeEvalStatus(selectedEvaluation)}
+            </Alert>
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
               {Object.entries(selectedEvaluation.metrics).map(([metric, value]) => (
-                <Chip key={metric} size="small" label={`${metric.replace(/_/g, ' ')} · ${pct(value)}`} variant="outlined" />
+                <Chip key={metric} size="small" label={`${formatMetricLabel(metric)} · ${pct(value)}`} variant="outlined" />
               ))}
             </Stack>
             {selectedEvaluation.notes.map((note) => (
@@ -739,6 +986,7 @@ export default function App() {
   )
 
   return (
+    <>
     <Box sx={{ minHeight: '100vh', background: 'radial-gradient(circle at top, rgba(99,102,241,0.18) 0%, rgba(13,18,34,1) 38%, rgba(5,8,16,1) 100%)', p: { xs: 2, md: 3 } }}>
       <Box sx={{ position: 'fixed', inset: 0, pointerEvents: 'none', background: 'linear-gradient(120deg, rgba(125,211,167,0.05), transparent 28%, transparent 72%, rgba(192,132,252,0.05))' }} />
       <Stack spacing={3} sx={{ position: 'relative' }}>
@@ -854,5 +1102,38 @@ export default function App() {
         </Stack>
       </Stack>
     </Box>
+    <Dialog fullScreen open={traceViewOpen && Boolean(selectedTrace)} onClose={() => setTraceViewOpen(false)}>
+      <DialogContent sx={{ p: { xs: 2, md: 3 }, background: 'radial-gradient(circle at top, rgba(99,102,241,0.16) 0%, rgba(13,18,34,1) 42%, rgba(5,8,16,1) 100%)' }}>
+        {selectedTrace ? (
+          <Stack spacing={2.5}>
+            <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
+              <Box>
+                <Typography variant="h4" fontWeight={700}>Trace detail</Typography>
+                <Typography variant="body1" sx={{ color: 'rgba(228,235,255,0.72)', mt: 1 }}>
+                  Full-screen inspection for long payloads and dense trace metadata.
+                </Typography>
+              </Box>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Chip label={selectedTrace.type} color={toneForType(selectedTrace.type) as any} />
+                <Chip label={selectedTrace.function} variant="outlined" />
+                <Chip label={`Seq ${selectedTrace.sequence ?? '—'}`} variant="outlined" />
+                <Button variant="contained" onClick={() => setTraceViewOpen(false)}>Close</Button>
+              </Stack>
+            </Stack>
+            <SectionCard title="Trace metadata" description="Key linkage fields stay visible while you scroll the payload.">
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Chip label={`Session ${selectedTrace.session_id}`} variant="outlined" />
+                <Chip label={`Trace ${selectedTrace.id}`} variant="outlined" />
+                {selectedTrace.parent_trace_id ? <Chip label={`Parent ${selectedTrace.parent_reason ?? 'trace'} · ${selectedTrace.parent_trace_id}`} variant="outlined" /> : <Chip label="Root trace" variant="outlined" />}
+                <Chip label={new Date(selectedTrace.timestamp).toLocaleString()} variant="outlined" />
+                {selectedEvaluation ? <Chip label={`Eval ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} variant="outlined" /> : null}
+              </Stack>
+            </SectionCard>
+            <JsonViewer data={selectedTrace} title="Trace payload" maxHeight="calc(100vh - 320px)" />
+          </Stack>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+    </>
   )
 }
