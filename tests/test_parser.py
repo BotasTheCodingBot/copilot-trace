@@ -435,6 +435,7 @@ class MlflowImportTests(unittest.TestCase):
                     'timestamp': '2026-03-31T10:00:00Z',
                     'trace_type': 'ASSISTANT_MESSAGE',
                     'function_name': 'assistant_message',
+                    'message_id': 'msg-1',
                     'text': 'Hello',
                     'notes': 'assistant replied',
                     'evaluations': [{'id': 'eval-inline', 'score': 0.8, 'notes': ['good', 'concise']}],
@@ -445,9 +446,8 @@ class MlflowImportTests(unittest.TestCase):
                     'timestamp': '2026-03-31T10:00:00Z',
                     'trace_type': 'TOOL_CALL',
                     'function_name': 'tool.run',
+                    'message_id': 'msg-1',
                     'tool_call_id': 'call-123',
-                    'parent_trace_id': 'trace-1',
-                    'parent_reason': 'message',
                     'args': {'query': 'hello'},
                     'raw': {'nested': ['x', 1]},
                 },
@@ -458,8 +458,6 @@ class MlflowImportTests(unittest.TestCase):
                     'trace_type': 'TOOL_RESULT',
                     'function_name': 'tool.run',
                     'tool_call_id': 'call-123',
-                    'parent_trace_id': 'trace-2',
-                    'parent_reason': 'tool_call',
                     'result': {'ok': True, 'items': [1, 2, 3]},
                 },
                 {
@@ -510,8 +508,11 @@ class MlflowImportTests(unittest.TestCase):
             self.assertEqual(trace_payload['trace_version'], 2)
             self.assertEqual(trace_payload['root_span_id'], 'session:session-123')
             self.assertEqual(len(trace_payload['spans']), 5)
+            self.assertEqual([span['id'] for span in trace_payload['spans']], ['session:session-123', 'trace-1', 'trace-2', 'trace-3', 'trace-4'])
             self.assertEqual(spans_by_id['trace-2']['parent_id'], 'trace-1')
+            self.assertEqual(spans_by_id['trace-2']['attributes']['copilot_trace.parent_reason'], 'message')
             self.assertEqual(spans_by_id['trace-3']['parent_id'], 'trace-2')
+            self.assertEqual(spans_by_id['trace-3']['attributes']['copilot_trace.parent_reason'], 'tool_call')
             self.assertEqual(spans_by_id['trace-4']['parent_id'], 'session:session-123')
             self.assertEqual(
                 spans_by_id['trace-2']['start_time_ns'],
@@ -549,6 +550,7 @@ class MlflowImportTests(unittest.TestCase):
             self.assertEqual(result['mlflow_trace']['span_count'], 5)
             self.assertEqual(fake_mlflow.tags['copilot_trace.imported_trace_id'], 'trace-native-1')
             self.assertEqual(len(fake_mlflow.created_spans), 5)
+            self.assertEqual([span.name for span in fake_mlflow.created_spans], ['copilot-session:session-123', 'assistant_message', 'tool.run', 'tool.run', 'tool.orphan'])
             self.assertIsNone(fake_mlflow.created_spans[0].parent_span)
             self.assertIs(fake_mlflow.created_spans[1].parent_span, fake_mlflow.created_spans[0])
             self.assertIs(fake_mlflow.created_spans[2].parent_span, fake_mlflow.created_spans[1])

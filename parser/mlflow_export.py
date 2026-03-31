@@ -191,8 +191,9 @@ def _build_native_trace_payload(*, bundle: MlflowSessionBundle, bundle_name: str
         }
     ]
 
-    known_ids = {str(trace.get('id') or '') for trace in bundle.traces if trace.get('id')}
-    for index, trace in enumerate(bundle.traces):
+    traces = _with_inferred_trace_parents(bundle.traces)
+    known_ids = {str(trace.get('id') or '') for trace in traces if trace.get('id')}
+    for index, trace in enumerate(traces):
         trace_id = str(trace.get('id') or f'trace-{index + 1}')
         parent_trace_id = str(trace.get('parent_trace_id') or '').strip()
         parent_id = parent_trace_id if parent_trace_id in known_ids else root_id
@@ -233,6 +234,49 @@ def _build_native_trace_payload(*, bundle: MlflowSessionBundle, bundle_name: str
         'root_span_id': root_id,
         'spans': normalized_spans,
     }
+
+
+def _with_inferred_trace_parents(traces: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sorted_traces = sorted(
+        traces,
+        key=lambda trace: (
+            str(trace.get('timestamp') or ''),
+            int(trace.get('sequence') or 0),
+            str(trace.get('id') or ''),
+        ),
+    )
+    message_ids = {
+        str(trace.get('message_id')): str(trace.get('id'))
+        for trace in sorted_traces
+        if trace.get('message_id')
+        and trace.get('id')
+        and str(trace.get('trace_type') or trace.get('type') or '').upper() not in {'TOOL_CALL', 'TOOL_RESULT'}
+    }
+    tool_call_ids = {
+        str(trace.get('tool_call_id')): str(trace.get('id'))
+        for trace in sorted_traces
+        if trace.get('tool_call_id') and trace.get('id') and str(trace.get('trace_type') or trace.get('type') or '').upper() == 'TOOL_CALL'
+    }
+
+    enriched: list[dict[str, Any]] = []
+    for trace in sorted_traces:
+        trace_type = str(trace.get('trace_type') or trace.get('type') or '').upper()
+        parent_trace_id = str(trace.get('parent_trace_id') or '').strip() or None
+        parent_reason = trace.get('parent_reason')
+        if not parent_trace_id and trace_type == 'TOOL_CALL':
+            parent_trace_id = message_ids.get(str(trace.get('message_id') or ''))
+            parent_reason = 'message' if parent_trace_id else parent_reason
+        elif not parent_trace_id and trace_type == 'TOOL_RESULT':
+            parent_trace_id = tool_call_ids.get(str(trace.get('tool_call_id') or ''))
+            parent_reason = 'tool_call' if parent_trace_id else parent_reason
+        enriched.append(
+            {
+                **trace,
+                'parent_trace_id': parent_trace_id,
+                'parent_reason': parent_reason,
+            }
+        )
+    return enriched
 
 
 def _trace_span_name(trace: dict[str, Any]) -> str:
@@ -317,13 +361,8 @@ def _normalize_native_spans(spans: list[dict[str, Any]], *, root_span_id: str) -
     ]
     time_seed = min(all_times) if all_times else int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
 
-    ordered_ids: list[str] = []
-    if root_span_id in spans_by_id:
-        ordered_ids.append(root_span_id)
-    ordered_ids.extend(span_id for span_id in spans_by_id if span_id != root_span_id)
-
-    for index, span_id in enumerate(ordered_ids):
-        span = spans_by_id[span_id]
+    original_order = {span_id: index for index, span_id in enumerate(spans_by_id)}
+    for span_id, span in spans_by_id.items():
         parent_id = span.get('parent_id')
         if span_id == root_span_id:
             parent_id = None
@@ -331,7 +370,42 @@ def _normalize_native_spans(spans: list[dict[str, Any]], *, root_span_id: str) -
             parent_id = root_span_id
         elif parent_id in ('', None):
             parent_id = root_span_id
+        span['parent_id'] = parent_id
 
+    def sort_key(span_id: str) -> tuple[int, int, str]:
+        span = spans_by_id[span_id]
+        base_start = span.get('start_time_ns')
+        start_ns = int(base_start) if isinstance(base_start, (int, float)) and int(base_start) > 0 else time_seed + original_order[span_id]
+        return (start_ns, original_order[span_id], span_id)
+
+    children_by_parent: dict[str | None, list[str]] = {}
+    for span_id, span in spans_by_id.items():
+        parent_id = span.get('parent_id')
+        if span_id == parent_id:
+            parent_id = root_span_id if span_id != root_span_id else None
+            span['parent_id'] = parent_id
+        children_by_parent.setdefault(parent_id, []).append(span_id)
+    for child_ids in children_by_parent.values():
+        child_ids.sort(key=sort_key)
+
+    ordered_ids: list[str] = []
+    visited: set[str] = set()
+
+    def visit(span_id: str) -> None:
+        if span_id in visited:
+            return
+        visited.add(span_id)
+        ordered_ids.append(span_id)
+        for child_id in children_by_parent.get(span_id, []):
+            if child_id != span_id:
+                visit(child_id)
+
+    visit(root_span_id)
+    for span_id in sorted((span_id for span_id in spans_by_id if span_id not in visited), key=sort_key):
+        visit(span_id)
+
+    for index, span_id in enumerate(ordered_ids):
+        span = spans_by_id[span_id]
         base_start = span.get('start_time_ns')
         start_ns = int(base_start) if isinstance(base_start, (int, float)) and int(base_start) > 0 else time_seed + index
         base_end = span.get('end_time_ns')
@@ -339,7 +413,6 @@ def _normalize_native_spans(spans: list[dict[str, Any]], *, root_span_id: str) -
         if end_ns < start_ns:
             end_ns = start_ns + 1
 
-        span['parent_id'] = parent_id
         span['start_time_ns'] = start_ns
         span['end_time_ns'] = end_ns
         span['name'] = str(span.get('name') or span_id)
