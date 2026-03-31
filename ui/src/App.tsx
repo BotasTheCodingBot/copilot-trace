@@ -9,6 +9,7 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   LinearProgress,
   List,
   ListItemButton,
@@ -17,6 +18,7 @@ import {
   Pagination,
   Paper,
   Stack,
+  Switch,
   TextField,
   Typography,
 } from '@mui/material'
@@ -144,6 +146,12 @@ export default function App() {
   const [exportTagText, setExportTagText] = useState('')
   const [exportSelectedFolderLabel, setExportSelectedFolderLabel] = useState('')
   const [exportPickerMessage, setExportPickerMessage] = useState<string | null>(null)
+  const [exportAutoImportEnabled, setExportAutoImportEnabled] = useState(false)
+  const [mlflowTrackingUri, setMlflowTrackingUri] = useState('')
+  const [mlflowExperimentName, setMlflowExperimentName] = useState('')
+  const [mlflowRunName, setMlflowRunName] = useState('')
+  const [mlflowArtifactPath, setMlflowArtifactPath] = useState('copilot_trace_bundle')
+  const [mlflowImportTraces, setMlflowImportTraces] = useState(true)
   const [exportLoading, setExportLoading] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const [exportSuccess, setExportSuccess] = useState<string | null>(null)
@@ -370,6 +378,12 @@ export default function App() {
     setExportBundleName(selectedSession)
     setExportSelectedFolderLabel('')
     setExportPickerMessage(null)
+    setExportAutoImportEnabled(false)
+    setMlflowTrackingUri('')
+    setMlflowExperimentName('')
+    setMlflowRunName('')
+    setMlflowArtifactPath('copilot_trace_bundle')
+    setMlflowImportTraces(true)
     setExportError(null)
     setExportSuccess(null)
     setExportDialogOpen(true)
@@ -417,18 +431,33 @@ export default function App() {
     setExportError(null)
     setExportSuccess(null)
     try {
+      const requestBody: Record<string, unknown> = {
+        output_dir: normalizedOutputDir,
+        bundle_name: normalizedBundleName,
+        tags: parsedExportTags,
+      }
+      if (exportAutoImportEnabled) {
+        requestBody.mlflow_import = {
+          tracking_uri: mlflowTrackingUri.trim() || undefined,
+          experiment_name: mlflowExperimentName.trim() || undefined,
+          run_name: mlflowRunName.trim() || undefined,
+          artifact_path: mlflowArtifactPath,
+          import_traces: mlflowImportTraces,
+        }
+      }
+
       const response = await fetch(`${API_BASE}/api/traces/sessions/${encodeURIComponent(normalizedSessionId)}/export/mlflow`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          output_dir: normalizedOutputDir,
-          bundle_name: normalizedBundleName,
-          tags: parsedExportTags,
-        }),
+        body: JSON.stringify(requestBody),
       })
       const payload = await response.json().catch(() => null)
       if (!response.ok) throw new Error(payload?.error || `Export failed (${response.status})`)
-      setExportSuccess(`Session bundle written to ${payload?.export?.bundle_dir ?? normalizedOutputDir}.`)
+      const bundleDir = payload?.export?.bundle_dir ?? normalizedOutputDir
+      const importedRunId = payload?.mlflow_import?.run_id
+      setExportSuccess(importedRunId
+        ? `Session bundle written to ${bundleDir} and imported into MLflow run ${importedRunId}.`
+        : `Session bundle written to ${bundleDir}.`)
       setExportDialogOpen(false)
     } catch (submitError) {
       setExportError(submitError instanceof Error ? submitError.message : 'Export failed')
@@ -729,6 +758,55 @@ export default function App() {
                 ))}
               </Stack>
             ) : null}
+            <Stack spacing={1.5} sx={{ borderRadius: 2, border: '1px solid rgba(255,255,255,0.08)', p: 1.5 }}>
+              <FormControlLabel
+                control={<Switch checked={exportAutoImportEnabled} onChange={(event) => setExportAutoImportEnabled(event.target.checked)} />}
+                label="Import into MLflow right after export"
+              />
+              <Typography variant="caption" color="text.secondary">
+                Keeps the local bundle on disk, then replays it into an MLflow run in the same request.
+              </Typography>
+              {exportAutoImportEnabled ? (
+                <Stack spacing={1.25}>
+                  <TextField
+                    label="Tracking URI"
+                    placeholder="file:/home/tore/.openclaw/workspace/copilot-trace/out/mlruns"
+                    value={mlflowTrackingUri}
+                    onChange={(event) => setMlflowTrackingUri(event.target.value)}
+                    helperText="Optional. Leave blank to use MLFLOW_TRACKING_URI or MLflow defaults."
+                    fullWidth
+                  />
+                  <TextField
+                    label="Experiment name"
+                    placeholder="copilot-trace"
+                    value={mlflowExperimentName}
+                    onChange={(event) => setMlflowExperimentName(event.target.value)}
+                    helperText="Optional. Creates/selects the experiment before starting the run."
+                    fullWidth
+                  />
+                  <TextField
+                    label="Run name override"
+                    placeholder="session-2026-03-31"
+                    value={mlflowRunName}
+                    onChange={(event) => setMlflowRunName(event.target.value)}
+                    helperText="Optional. Defaults to the exported bundle name."
+                    fullWidth
+                  />
+                  <TextField
+                    label="Artifact subdirectory"
+                    placeholder="copilot_trace_bundle"
+                    value={mlflowArtifactPath}
+                    onChange={(event) => setMlflowArtifactPath(event.target.value)}
+                    helperText="Use empty text to log artifacts at the run root."
+                    fullWidth
+                  />
+                  <FormControlLabel
+                    control={<Switch checked={mlflowImportTraces} onChange={(event) => setMlflowImportTraces(event.target.checked)} />}
+                    label="Replay native MLflow trace spans"
+                  />
+                </Stack>
+              ) : null}
+            </Stack>
             {exportError ? <Alert severity="error" variant="outlined">{exportError}</Alert> : null}
           </Stack>
         </DialogContent>

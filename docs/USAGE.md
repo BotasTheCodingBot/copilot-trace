@@ -44,11 +44,14 @@
 5. **Annotate & explore**
    - Use the Parser page to search traces, switch timeline sort order, and inspect the selected trace beside the session stream.
    - Use **Export session** in the trace timeline header to write the currently selected session as a local MLflow-oriented bundle (`manifest.json`, `session.json`, `traces.json`, `evaluations.json`, `mlflow-run.json`) to a folder on disk.
+   - If you want a one-step handoff, enable **Import into MLflow right after export** in the same dialog to immediately create the MLflow run after writing the bundle.
+   - The auto-import section lets you set tracking URI, experiment name, run name override, artifact subdirectory, and whether to replay native trace spans.
    - The selected trace panel keeps payload and evaluation context visible while you move through paged results.
    - The Evaluation page surfaces heuristic scores per session/trace plus explicit status explanations, score bands, and sortable history.
    - Dashboard shows aggregated metrics and low-score triage.
 
 6. **Import a bundle into MLflow (optional)**
+   You can either use the export dialog’s auto-import toggle or run the importer directly:
    ```bash
    cd copilot-trace
    . .venv/bin/activate
@@ -64,6 +67,7 @@
    - Useful flags:
      - `--run-name my-session-run` to override the exported run name
      - `--artifact-path raw_bundle` to change the artifact subdirectory
+     - `--no-import-traces` to skip replaying the exported native trace payload
      - `--no-set-terminated` if you want to leave lifecycle handling to another process
 
 7. **Automated usage**

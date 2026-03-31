@@ -12,7 +12,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from parser.copilot_parser import CopilotSessionParser, TraceRow
-from parser.mlflow_export import MlflowExportError, MlflowSessionBundle, config_from_payload, export_session_to_mlflow_bundle
+from parser.mlflow_export import MlflowExportError, MlflowSessionBundle, config_from_payload as export_config_from_payload, export_session_to_mlflow_bundle
+from parser.mlflow_import import MlflowImportError, config_from_payload as import_config_from_payload, import_bundle_to_mlflow
 
 
 class TraceRepository:
@@ -503,13 +504,20 @@ class TraceApiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            config = config_from_payload(payload)
-            result = export_session_to_mlflow_bundle(bundle=session_bundle, config=config)
-        except MlflowExportError as exc:
+            export_config = export_config_from_payload(payload)
+            export_result = export_session_to_mlflow_bundle(bundle=session_bundle, config=export_config)
+            import_result = None
+            if payload.get('mlflow_import'):
+                import_payload = payload.get('mlflow_import')
+                if not isinstance(import_payload, dict):
+                    raise MlflowImportError('mlflow_import must be an object when provided')
+                import_config = import_config_from_payload(import_payload, bundle_dir=export_result['bundle_dir'])
+                import_result = import_bundle_to_mlflow(config=import_config)
+        except (MlflowExportError, MlflowImportError) as exc:
             self._write_json({'error': str(exc), 'id': session_id}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        self._write_json({'ok': True, 'session_id': session_id, 'export': result}, status=HTTPStatus.CREATED)
+        self._write_json({'ok': True, 'session_id': session_id, 'export': export_result, 'mlflow_import': import_result}, status=HTTPStatus.CREATED)
 
     def do_PATCH(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

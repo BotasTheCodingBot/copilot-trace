@@ -113,7 +113,16 @@ npm run dev -- --host 0.0.0.0 --port 5173
 
 Open <http://localhost:5173/#/parser>. The Parser page keeps the paged timeline front and center, with the selected trace docked beside it so payload and evaluation context stay visible while you move through the session. The trace timeline header also exposes an **Export session** action for the currently selected session, writing an MLflow-oriented JSON bundle to a local folder you choose.
 
+The export dialog can also **auto-import the freshly written bundle into MLflow** in the same request. Toggle **Import into MLflow right after export** to optionally provide:
+- `tracking_uri` (or leave blank to use `MLFLOW_TRACKING_URI` / MLflow defaults)
+- experiment name
+- run name override
+- artifact subdirectory (`copilot_trace_bundle` by default, or empty for run root)
+- whether to replay the exported native trace spans
+
 ### 4) Import an exported bundle into MLflow
+You can either use the export dialog’s auto-import toggle or run the importer script directly:
+
 ```bash
 cd copilot-trace
 . .venv/bin/activate

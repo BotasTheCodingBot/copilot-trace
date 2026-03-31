@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 import msgpack
@@ -208,6 +209,63 @@ class CopilotParserTests(unittest.TestCase):
                 api_server.server_close()
                 api_thread.join(timeout=2)
 
+    def test_api_can_export_and_auto_import_bundle_into_mlflow(self):
+        rows = self.parser.parse_session_file(self.session_file)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / 'traces.db'
+            export_root = tmp_path / 'exports'
+            self.parser.export_sqlite(rows, db_path)
+
+            api_server = create_server(db_path=db_path, host='127.0.0.1', port=0)
+            api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
+            api_thread.start()
+            try:
+                api_base = f'http://127.0.0.1:{api_server.server_address[1]}'
+                sessions_payload = json.loads(urlopen(f'{api_base}/api/traces/sessions?limit=1&offset=0').read().decode('utf-8'))
+                session_id = sessions_payload['sessions'][0]['session_id']
+
+                with patch('parser.api.import_bundle_to_mlflow', return_value={
+                    'status': 'IMPORTED',
+                    'run_id': 'run-456',
+                    'run_name': 'copilot-session-export',
+                    'bundle_dir': str(export_root / 'copilot-session-export'),
+                    'artifact_path': 'copilot_trace_bundle',
+                    'mlflow_trace': {'imported': False, 'span_count': 0},
+                }) as import_mock:
+                    export_request = Request(
+                        f'{api_base}/api/traces/sessions/{session_id}/export/mlflow',
+                        data=json.dumps({
+                            'output_dir': str(export_root),
+                            'bundle_name': 'copilot-session-export',
+                            'mlflow_import': {
+                                'tracking_uri': 'file:///tmp/mlruns',
+                                'experiment_name': 'copilot-trace',
+                                'run_name': 'manual-run-name',
+                                'artifact_path': '',
+                                'import_traces': False,
+                            },
+                        }).encode('utf-8'),
+                        headers={'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    payload = json.loads(urlopen(export_request).read().decode('utf-8'))
+
+                self.assertTrue(payload['ok'])
+                self.assertEqual(payload['export']['bundle_name'], 'copilot-session-export')
+                self.assertEqual(payload['mlflow_import']['run_id'], 'run-456')
+                self.assertEqual(import_mock.call_count, 1)
+                import_config = import_mock.call_args.kwargs['config']
+                self.assertEqual(import_config.bundle_dir, str(export_root / 'copilot-session-export'))
+                self.assertEqual(import_config.tracking_uri, 'file:///tmp/mlruns')
+                self.assertEqual(import_config.experiment_name, 'copilot-trace')
+                self.assertEqual(import_config.run_name, 'manual-run-name')
+                self.assertEqual(import_config.artifact_path, '')
+                self.assertFalse(import_config.import_traces)
+            finally:
+                api_server.shutdown()
+                api_server.server_close()
+                api_thread.join(timeout=2)
 
     def test_storage_manager_rotates_existing_db_and_updates_config(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,6 +4,7 @@ import argparse
 import importlib
 import json
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,27 @@ class MlflowImportConfig:
     artifact_path: str | None = 'copilot_trace_bundle'
     set_terminated: bool = True
     import_traces: bool = True
+
+
+def config_from_payload(payload: dict[str, Any], *, bundle_dir: str) -> MlflowImportConfig:
+    tracking_uri = str(payload.get('tracking_uri') or os.getenv('MLFLOW_TRACKING_URI') or '').strip() or None
+    experiment_name = str(payload.get('experiment_name') or '').strip() or None
+    run_name = str(payload.get('run_name') or '').strip() or None
+    artifact_path = payload.get('artifact_path')
+    if artifact_path is None:
+        artifact_path = 'copilot_trace_bundle'
+    elif not isinstance(artifact_path, str):
+        raise MlflowImportError('artifact_path must be a string')
+
+    return MlflowImportConfig(
+        bundle_dir=bundle_dir,
+        tracking_uri=tracking_uri,
+        experiment_name=experiment_name,
+        run_name=run_name,
+        artifact_path=artifact_path,
+        set_terminated=_coerce_bool(payload.get('set_terminated'), default=True, field_name='set_terminated'),
+        import_traces=_coerce_bool(payload.get('import_traces'), default=True, field_name='import_traces'),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -188,6 +210,14 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _validate_manifest(manifest: dict[str, Any], bundle_dir: Path) -> None:
     if manifest.get('format') != 'copilot-trace.mlflow-bundle':
         raise MlflowImportError(f'Unsupported bundle format in {bundle_dir / "manifest.json"}')
+
+
+def _coerce_bool(value: Any, *, default: bool, field_name: str) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise MlflowImportError(f'{field_name} must be a boolean')
 
 
 def _coerce_metrics(metrics: dict[str, Any]) -> dict[str, float]:
