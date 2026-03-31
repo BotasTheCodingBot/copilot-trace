@@ -62,8 +62,10 @@ def export_session_to_mlflow_bundle(*, bundle: MlflowSessionBundle, config: Mlfl
         for status, count in (bundle.evaluation_summary.get('status_breakdown') or {}).items():
             metrics[f'status_{status}'] = float(count)
 
+    native_trace = _build_native_trace_payload(bundle=bundle, bundle_name=bundle_name, created_at=created_at)
+
     manifest = {
-        'bundle_version': 1,
+        'bundle_version': 2,
         'format': 'copilot-trace.mlflow-bundle',
         'created_at': created_at,
         'bundle_name': bundle_name,
@@ -75,6 +77,7 @@ def export_session_to_mlflow_bundle(*, bundle: MlflowSessionBundle, config: Mlfl
             'traces': 'traces.json',
             'evaluations': 'evaluations.json',
             'mlflow_run': 'mlflow-run.json',
+            'mlflow_trace': 'mlflow-trace.json',
         },
     }
 
@@ -105,6 +108,7 @@ def export_session_to_mlflow_bundle(*, bundle: MlflowSessionBundle, config: Mlfl
         encoding='utf-8',
     )
     (bundle_dir / 'mlflow-run.json').write_text(json.dumps(mlflow_run, ensure_ascii=False, indent=2), encoding='utf-8')
+    (bundle_dir / 'mlflow-trace.json').write_text(json.dumps(native_trace, ensure_ascii=False, indent=2), encoding='utf-8')
 
     return {
         'output_dir': str(output_root),
@@ -154,3 +158,159 @@ def _string_limit(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 1] + '…'
+
+
+def _build_native_trace_payload(*, bundle: MlflowSessionBundle, bundle_name: str, created_at: str) -> dict[str, Any]:
+    session_id = str(bundle.session.get('session_id') or '')
+    root_start = _to_unix_nanos(bundle.session.get('first_timestamp'))
+    root_end = _to_unix_nanos(bundle.session.get('last_timestamp'))
+    root_id = f'session:{session_id or bundle_name}'
+
+    spans: list[dict[str, Any]] = [
+        {
+            'id': root_id,
+            'parent_id': None,
+            'name': f'copilot-session:{session_id or bundle_name}',
+            'span_type': 'SESSION',
+            'start_time_ns': root_start,
+            'end_time_ns': root_end,
+            'status': 'OK',
+            'inputs': {
+                'session_id': session_id,
+                'bundle_name': bundle_name,
+            },
+            'outputs': {
+                'trace_count': len(bundle.traces),
+                'evaluation_count': len(bundle.evaluations),
+            },
+            'attributes': {
+                'copilot_trace.kind': 'session',
+                'copilot_trace.bundle_created_at': created_at,
+            },
+            'events': [],
+        }
+    ]
+
+    known_ids = {str(trace.get('id') or '') for trace in bundle.traces if trace.get('id')}
+    for index, trace in enumerate(bundle.traces):
+        trace_id = str(trace.get('id') or f'trace-{index + 1}')
+        parent_trace_id = str(trace.get('parent_trace_id') or '').strip()
+        parent_id = parent_trace_id if parent_trace_id in known_ids else root_id
+        timestamp_ns = _to_unix_nanos(trace.get('timestamp'))
+        attributes = {
+            'copilot_trace.kind': 'entry',
+            'copilot_trace.trace_id': trace_id,
+            'copilot_trace.trace_type': str(trace.get('trace_type') or trace.get('type') or 'UNKNOWN'),
+            'copilot_trace.function_name': str(trace.get('function_name') or trace.get('function') or ''),
+            'copilot_trace.sequence': trace.get('sequence'),
+            'copilot_trace.tags': trace.get('tags') or [],
+            'copilot_trace.raw': trace,
+        }
+        spans.append(
+            {
+                'id': trace_id,
+                'parent_id': parent_id,
+                'name': _trace_span_name(trace),
+                'span_type': _trace_span_type(trace),
+                'start_time_ns': timestamp_ns,
+                'end_time_ns': timestamp_ns,
+                'status': 'OK',
+                'inputs': _trace_inputs(trace),
+                'outputs': _trace_outputs(trace),
+                'attributes': {k: v for k, v in attributes.items() if v not in (None, '', [], {})},
+                'events': _trace_events(trace),
+            }
+        )
+
+    return {
+        'format': 'copilot-trace.mlflow-native-trace',
+        'trace_version': 1,
+        'session_id': session_id,
+        'bundle_name': bundle_name,
+        'root_span_id': root_id,
+        'spans': spans,
+    }
+
+
+def _trace_span_name(trace: dict[str, Any]) -> str:
+    return str(
+        trace.get('function_name')
+        or trace.get('function')
+        or trace.get('trace_type')
+        or trace.get('type')
+        or trace.get('id')
+        or 'copilot.trace'
+    )
+
+
+def _trace_span_type(trace: dict[str, Any]) -> str:
+    trace_type = str(trace.get('trace_type') or trace.get('type') or '').upper()
+    if 'TOOL' in trace_type:
+        return 'TOOL'
+    if 'USER' in trace_type:
+        return 'CHAT_MODEL'
+    if 'ASSISTANT' in trace_type or 'MODEL' in trace_type:
+        return 'LLM'
+    return 'CHAIN'
+
+
+def _trace_inputs(trace: dict[str, Any]) -> Any:
+    for key in ('input', 'inputs', 'arguments', 'prompt', 'message', 'text'):
+        if key in trace and trace.get(key) not in (None, ''):
+            return trace.get(key)
+    return {
+        key: trace.get(key)
+        for key in ('trace_type', 'function_name', 'timestamp')
+        if trace.get(key) not in (None, '')
+    }
+
+
+def _trace_outputs(trace: dict[str, Any]) -> Any:
+    for key in ('output', 'outputs', 'result', 'response', 'value', 'state'):
+        if key in trace and trace.get(key) not in (None, ''):
+            return trace.get(key)
+    return None
+
+
+def _trace_events(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    notes = trace.get('notes')
+    if notes:
+        events.append({'name': 'copilot.notes', 'timestamp_unix_nano': _to_unix_nanos(trace.get('timestamp')), 'attributes': {'notes': notes}})
+    evaluations = trace.get('evaluations') or []
+    for evaluation in evaluations:
+        events.append(
+            {
+                'name': 'copilot.evaluation',
+                'timestamp_unix_nano': _to_unix_nanos(evaluation.get('timestamp') or trace.get('timestamp')),
+                'attributes': evaluation,
+            }
+        )
+    return events
+
+
+def _to_unix_nanos(value: Any) -> int | None:
+    if value in (None, ''):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = int(value)
+        if numeric > 10_000_000_000_000_000:
+            return numeric
+        if numeric > 10_000_000_000_000:
+            return numeric * 1_000
+        if numeric > 10_000_000_000:
+            return numeric * 1_000_000
+        return numeric * 1_000_000_000
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return _to_unix_nanos(int(text))
+    except ValueError:
+        pass
+    try:
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        return int(datetime.fromisoformat(text).timestamp() * 1_000_000_000)
+    except ValueError:
+        return None

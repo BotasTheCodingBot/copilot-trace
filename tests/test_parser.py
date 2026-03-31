@@ -273,7 +273,35 @@ class _FakeRun:
         self.info = _FakeRunInfo(run_id)
 
 
+class _FakeSpanEvent:
+    def __init__(self, name: str, attributes: dict | None = None, timestamp: int | None = None):
+        self.name = name
+        self.attributes = attributes or {}
+        self.timestamp = timestamp
+
+
+class _FakeSpan:
+    def __init__(self, *, name: str, span_type: str, parent_span=None, inputs=None, attributes=None, start_time_ns=None, trace_id: str = 'trace-native-123'):
+        self.name = name
+        self.span_type = span_type
+        self.parent_span = parent_span
+        self.inputs = inputs
+        self.attributes = attributes or {}
+        self.start_time_ns = start_time_ns
+        self.trace_id = trace_id if parent_span is None else parent_span.trace_id
+        self.events: list[_FakeSpanEvent] = []
+        self.end_calls: list[dict[str, object]] = []
+
+    def add_event(self, event) -> None:
+        self.events.append(event)
+
+    def end(self, outputs=None, status=None, end_time_ns=None) -> None:
+        self.end_calls.append({'outputs': outputs, 'status': status, 'end_time_ns': end_time_ns})
+
+
 class _FakeMlflow:
+    SpanEvent = _FakeSpanEvent
+
     def __init__(self) -> None:
         self.tracking_uri = None
         self.experiment_name = None
@@ -283,6 +311,7 @@ class _FakeMlflow:
         self.metrics: list[tuple[str, float]] = []
         self.artifacts = None
         self.ended_status = None
+        self.created_spans: list[_FakeSpan] = []
 
     def set_tracking_uri(self, tracking_uri: str) -> None:
         self.tracking_uri = tracking_uri
@@ -293,6 +322,19 @@ class _FakeMlflow:
     def start_run(self, run_name: str | None = None):
         self.started_run_name = run_name
         return _FakeRun('run-123')
+
+    def start_span_no_context(self, name: str, span_type: str = 'CHAIN', parent_span=None, inputs=None, attributes=None, start_time_ns=None):
+        span = _FakeSpan(
+            name=name,
+            span_type=span_type,
+            parent_span=parent_span,
+            inputs=inputs,
+            attributes=attributes,
+            start_time_ns=start_time_ns,
+            trace_id=f'trace-native-{len(self.created_spans) + 1}',
+        )
+        self.created_spans.append(span)
+        return span
 
     def set_tags(self, tags: dict[str, str]) -> None:
         self.tags = tags
@@ -347,6 +389,8 @@ class MlflowImportTests(unittest.TestCase):
             self.assertEqual(bundle.traces_payload['count'], 2)
             self.assertEqual(bundle.evaluations_payload['count'], 1)
             self.assertEqual(bundle.run_payload['run_name'], 'bundle-under-test')
+            self.assertEqual(bundle.trace_payload['format'], 'copilot-trace.mlflow-native-trace')
+            self.assertGreaterEqual(len(bundle.trace_payload['spans']), 3)
 
     def test_import_bundle_logs_run_metadata_and_artifacts(self):
         fake_mlflow = _FakeMlflow()
@@ -371,6 +415,12 @@ class MlflowImportTests(unittest.TestCase):
             self.assertEqual(fake_mlflow.artifacts, (str(bundle_dir), 'copilot_trace_bundle'))
             self.assertEqual(fake_mlflow.tags['env'], 'test')
             self.assertEqual(fake_mlflow.tags['copilot_trace.bundle_format'], 'copilot-trace.mlflow-bundle')
+            self.assertTrue(result['mlflow_trace']['imported'])
+            self.assertEqual(result['mlflow_trace']['span_count'], 3)
+            self.assertEqual(fake_mlflow.tags['copilot_trace.imported_trace_id'], 'trace-native-1')
+            self.assertEqual(len(fake_mlflow.created_spans), 3)
+            self.assertIsNone(fake_mlflow.created_spans[0].parent_span)
+            self.assertIs(fake_mlflow.created_spans[1].parent_span, fake_mlflow.created_spans[0])
             self.assertEqual(fake_mlflow.ended_status, 'FINISHED')
 
     def test_load_bundle_rejects_unknown_manifest_format(self):
