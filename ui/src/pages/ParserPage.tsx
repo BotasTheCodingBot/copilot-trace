@@ -1,4 +1,19 @@
-import { Alert, Box, Button, Chip, Divider, List, ListItemButton, ListItemText, MenuItem, Pagination, Paper, Stack, TextField, Typography } from '@mui/material'
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Divider,
+  List,
+  ListItemButton,
+  ListItemText,
+  MenuItem,
+  Pagination,
+  Paper,
+  Stack,
+  TextField,
+  Typography,
+} from '@mui/material'
 import JsonViewer from '../components/JsonViewer'
 import { TRACE_PAGE_SIZE } from '../lib/appConfig'
 import { pct, safeText, SectionCard, toneForStatus, toneForType, formatMetricLabel, describeEvalStatus } from '../lib/appUtils'
@@ -12,6 +27,7 @@ interface ParserPageProps {
   overview: Record<string, number>
   search: string
   selectedEvaluation?: Evaluation
+  onOpenExportDialog: () => void
   selectedSession: string
   selectedTag: string
   selectedTrace: Trace | null
@@ -29,6 +45,22 @@ interface ParserPageProps {
   tracesTotal: number
 }
 
+export function parseMlflowTags(input: string): Record<string, string> {
+  return input
+    .split(/\r?\n|,/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reduce<Record<string, string>>((acc, entry) => {
+      const separatorIndex = entry.indexOf('=')
+      if (separatorIndex <= 0) return acc
+      const key = entry.slice(0, separatorIndex).trim()
+      const value = entry.slice(separatorIndex + 1).trim()
+      if (!key || !value) return acc
+      acc[key] = value
+      return acc
+    }, {})
+}
+
 export default function ParserPage({
   availableTags,
   availableTypes,
@@ -36,6 +68,7 @@ export default function ParserPage({
   evaluationByTraceId,
   overview,
   search,
+  onOpenExportDialog,
   selectedEvaluation,
   selectedSession,
   selectedTag,
@@ -53,6 +86,9 @@ export default function ParserPage({
   traces,
   tracesTotal,
 }: ParserPageProps) {
+
+
+
   return (
     <Stack spacing={3}>
       <SectionCard
@@ -91,6 +127,17 @@ export default function ParserPage({
       <Stack direction={{ xs: 'column', xl: 'row' }} spacing={3} alignItems="stretch">
         <Box sx={{ flex: 1.15, minWidth: 0 }}>
           <SectionCard title="Trace timeline" description={`${traces.length} traces on this page · ${tracesTotal} matching the current query.`}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" spacing={1.5} alignItems={{ sm: 'center' }}>
+              <Box>
+                <Typography variant="subtitle2" fontWeight={700}>Selected session actions</Typography>
+                <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)' }}>
+                  Export the currently selected session as an MLflow-oriented bundle.
+                </Typography>
+              </Box>
+              <Button variant="outlined" onClick={onOpenExportDialog} disabled={!selectedSession.trim()}>
+                Export session
+              </Button>
+            </Stack>
             <List sx={{ maxHeight: 820, overflow: 'auto', py: 0 }}>
               {traces.map((trace) => {
                 const traceEval = evaluationByTraceId.get(trace.id)
@@ -138,14 +185,17 @@ export default function ParserPage({
           <SectionCard title="Selected trace" description="The active trace stays beside the timeline so payload detail and evaluation context remain visible while you scroll the session.">
             {selectedTrace ? (
               <Stack spacing={2}>
-                <Stack direction="row" spacing={1} mb={0.5} flexWrap="wrap" useFlexGap>
-                  <Chip size="small" label={selectedTrace.type} color={toneForType(selectedTrace.type) as any} />
-                  <Chip size="small" label={selectedTrace.function} variant="outlined" />
-                  <Chip size="small" label={`Seq ${selectedTrace.sequence ?? '—'}`} variant="outlined" />
-                  {selectedTrace.parent_trace_id ? <Chip size="small" label={`Parent ${selectedTrace.parent_reason ?? 'trace'} · ${selectedTrace.parent_trace_id}`} variant="outlined" /> : <Chip size="small" label="Root trace" variant="outlined" />}
-                  <Chip size="small" label={new Date(selectedTrace.timestamp).toLocaleString()} variant="outlined" />
-                  {selectedEvaluation ? <Chip size="small" label={`Eval ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} variant="outlined" /> : null}
+                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
+                  <Stack direction="row" spacing={1} mb={0.5} flexWrap="wrap" useFlexGap>
+                    <Chip size="small" label={selectedTrace.type} color={toneForType(selectedTrace.type) as any} />
+                    <Chip size="small" label={selectedTrace.function} variant="outlined" />
+                    <Chip size="small" label={`Seq ${selectedTrace.sequence ?? '—'}`} variant="outlined" />
+                    {selectedTrace.parent_trace_id ? <Chip size="small" label={`Parent ${selectedTrace.parent_reason ?? 'trace'} · ${selectedTrace.parent_trace_id}`} variant="outlined" /> : <Chip size="small" label="Root trace" variant="outlined" />}
+                    <Chip size="small" label={new Date(selectedTrace.timestamp).toLocaleString()} variant="outlined" />
+                    {selectedEvaluation ? <Chip size="small" label={`Eval ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} variant="outlined" /> : null}
+                  </Stack>
                 </Stack>
+
 
                 <Paper elevation={0} sx={{ p: 2, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
                   <Stack spacing={1.25}>

@@ -6,7 +6,7 @@ Trace review UI for browsing Copilot sessions, evaluation history, and per-trace
 
 The UI is intentionally split into three focused pages:
 
-- **Parser overview** — timeline-first session review with filters, paging, and a docked selected-trace panel.
+- **Parser overview** — timeline-first session review with filters, paging, a docked selected-trace panel, and session-level export actions that write local MLflow bundles.
 - **Evaluation** — session score trends, recent trace evaluations, and score breakdowns.
 - **Dashboard** — aggregate counts, coverage signals, and low-score triage.
 

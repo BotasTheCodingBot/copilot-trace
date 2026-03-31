@@ -1,9 +1,14 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import {
   Alert,
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   LinearProgress,
   List,
   ListItemButton,
@@ -53,6 +58,49 @@ const ParserPage = lazy(() => import('./pages/ParserPage'))
 const EvaluationPage = lazy(() => import('./pages/EvaluationPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 
+export function parseBundleTags(input: string): Record<string, string> {
+  return input
+    .split(/\r?\n|,/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reduce<Record<string, string>>((acc, entry) => {
+      const separatorIndex = entry.indexOf('=')
+      if (separatorIndex <= 0) return acc
+      const key = entry.slice(0, separatorIndex).trim()
+      const value = entry.slice(separatorIndex + 1).trim()
+      if (!key || !value) return acc
+      acc[key] = value
+      return acc
+    }, {})
+}
+
+type DirectoryHandleLike = {
+  name?: string
+  path?: string
+  fullPath?: string
+  absolutePath?: string
+}
+
+type WindowWithDirectoryPicker = {
+  showDirectoryPicker?: (options?: { mode?: 'read' | 'readwrite' }) => Promise<DirectoryHandleLike>
+}
+
+function readDirectoryPath(handle: DirectoryHandleLike | null | undefined): string {
+  if (!handle) return ''
+  const candidate = [handle.path, handle.fullPath, handle.absolutePath].find((value) => typeof value === 'string' && value.trim())
+  return candidate?.trim() ?? ''
+}
+
+export function supportsNativeDirectoryPicker(target: WindowWithDirectoryPicker | undefined = typeof window === 'undefined' ? undefined : (window as WindowWithDirectoryPicker)): boolean {
+  return typeof target?.showDirectoryPicker === 'function'
+}
+
+export function describePickedDirectory(handle: DirectoryHandleLike | null | undefined): { path: string; label: string } {
+  const path = readDirectoryPath(handle)
+  const label = handle?.name?.trim() || path || 'selected folder'
+  return { path, label }
+}
+
 export default function App() {
   const [page, setPage] = useState<AppPage>(() => pageForPath(getCurrentPath()))
   const [sampleState, setSampleState] = useState<SampleState>(EMPTY_SAMPLE_STATE)
@@ -90,6 +138,15 @@ export default function App() {
   const [loadingEvaluations, setLoadingEvaluations] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [sourceLabel, setSourceLabel] = useState('live API')
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [exportOutputDir, setExportOutputDir] = useState('')
+  const [exportBundleName, setExportBundleName] = useState('')
+  const [exportTagText, setExportTagText] = useState('')
+  const [exportSelectedFolderLabel, setExportSelectedFolderLabel] = useState('')
+  const [exportPickerMessage, setExportPickerMessage] = useState<string | null>(null)
+  const [exportLoading, setExportLoading] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null)
 
   useEffect(() => {
     const params = new URLSearchParams(getCurrentSearch())
@@ -295,6 +352,90 @@ export default function App() {
   const evaluation = useMemo(() => sessionEvaluations.find((item) => item.session_id === selectedSession), [sessionEvaluations, selectedSession])
   const evaluationByTraceId = useMemo(() => new Map(evaluations.map((item) => [item.target_trace_id, item])), [evaluations])
   const selectedEvaluation = selectedTrace ? evaluationByTraceId.get(selectedTrace.id) : undefined
+  const parsedExportTags = useMemo(() => parseBundleTags(exportTagText), [exportTagText])
+  const nativeDirectoryPickerSupported = useMemo(() => supportsNativeDirectoryPicker(), [])
+  const activeExportSessionId = exportDialogOpen ? selectedSession.trim() : ''
+
+  useEffect(() => {
+    if (!exportDialogOpen) return
+    setExportBundleName((current) => current.trim() ? current : selectedSession)
+  }, [exportDialogOpen, selectedSession])
+
+  const handleExportOutputDirChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setExportOutputDir(event.target.value)
+    setExportPickerMessage(null)
+  }
+
+  const handleOpenExportDialog = () => {
+    setExportBundleName(selectedSession)
+    setExportSelectedFolderLabel('')
+    setExportPickerMessage(null)
+    setExportError(null)
+    setExportSuccess(null)
+    setExportDialogOpen(true)
+  }
+
+  const handleCloseExportDialog = () => {
+    if (exportLoading) return
+    setExportDialogOpen(false)
+  }
+
+  const handlePickExportFolder = async () => {
+    if (!supportsNativeDirectoryPicker() || exportLoading) return
+    setExportError(null)
+    try {
+      const handle = await (window as WindowWithDirectoryPicker).showDirectoryPicker?.({ mode: 'readwrite' })
+      const { path, label } = describePickedDirectory(handle)
+      setExportSelectedFolderLabel(label)
+      if (path) {
+        setExportOutputDir(path)
+        setExportPickerMessage(`Using native folder selection for ${label}.`)
+        return
+      }
+      setExportPickerMessage(`Picked “${label}”, but this browser only exposes the folder name here. Paste the full path below to finish the export.`)
+    } catch (pickerError) {
+      const message = pickerError instanceof Error ? pickerError.message : ''
+      if (message.toLowerCase().includes('abort')) return
+      setExportError(message || 'Folder selection failed')
+    }
+  }
+
+  const handleSubmitExport = async () => {
+    const normalizedSessionId = activeExportSessionId
+    const normalizedOutputDir = exportOutputDir.trim()
+    const normalizedBundleName = exportBundleName.trim() || normalizedSessionId
+    if (!normalizedSessionId) {
+      setExportError('Session id is required.')
+      return
+    }
+    if (!normalizedOutputDir) {
+      setExportError('Output folder is required.')
+      return
+    }
+
+    setExportLoading(true)
+    setExportError(null)
+    setExportSuccess(null)
+    try {
+      const response = await fetch(`${API_BASE}/api/traces/sessions/${encodeURIComponent(normalizedSessionId)}/export/mlflow`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          output_dir: normalizedOutputDir,
+          bundle_name: normalizedBundleName,
+          tags: parsedExportTags,
+        }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(payload?.error || `Export failed (${response.status})`)
+      setExportSuccess(`Session bundle written to ${payload?.export?.bundle_dir ?? normalizedOutputDir}.`)
+      setExportDialogOpen(false)
+    } catch (submitError) {
+      setExportError(submitError instanceof Error ? submitError.message : 'Export failed')
+    } finally {
+      setExportLoading(false)
+    }
+  }
 
   const overview = useMemo(() => traces.reduce<Record<string, number>>((acc, trace) => { acc[trace.type] = (acc[trace.type] || 0) + 1; return acc }, {}), [traces])
   const annotatedCount = useMemo(() => traces.filter((trace) => trace.notes?.trim()).length, [traces])
@@ -379,6 +520,7 @@ export default function App() {
             evaluationByTraceId={evaluationByTraceId}
             overview={overview}
             search={search}
+            onOpenExportDialog={handleOpenExportDialog}
             selectedEvaluation={selectedEvaluation}
             selectedSession={selectedSession}
             selectedTag={selectedTag}
@@ -421,6 +563,7 @@ export default function App() {
             </Stack>
 
             {error ? <Alert severity="warning" variant="outlined">{error}</Alert> : null}
+            {exportSuccess ? <Alert severity="success" variant="outlined">{exportSuccess}</Alert> : null}
             {(loadingSessions || loadingTraces || loadingEvaluations) ? <LinearProgress sx={{ borderRadius: 999, height: 8, backgroundColor: 'rgba(255,255,255,0.08)' }} /> : null}
           </Stack>
         </Paper>
@@ -484,13 +627,26 @@ export default function App() {
                 <List dense sx={{ maxHeight: 460, overflow: 'auto', py: 0 }}>
                   {sessions.map((session) => {
                     const sessionEval = sessionEvaluations.find((item) => item.session_id === session.session_id)
+                    const selected = session.session_id === selectedSession
                     return (
-                      <ListItemButton key={session.session_id} selected={session.session_id === selectedSession} onClick={() => { setSelectedSession(session.session_id); setSelectedTraceId(null); setTracePage(1) }}>
-                        <ListItemText
-                          primary={session.session_id}
-                          secondary={`${session.trace_count} traces · ${session.annotated_count ?? 0} annotated${sessionEval ? ` · avg ${pct(sessionEval.average_score)}` : ''}`}
-                        />
-                      </ListItemButton>
+                      <Box key={session.session_id} sx={{ px: 0.5, py: 0.25 }}>
+                        <Paper
+                          elevation={0}
+                          sx={{
+                            borderRadius: 2,
+                            border: selected ? '1px solid rgba(125,211,167,0.32)' : '1px solid rgba(255,255,255,0.06)',
+                            background: selected ? 'rgba(125,211,167,0.08)' : 'rgba(255,255,255,0.02)',
+                            overflow: 'hidden',
+                          }}
+                        >
+                          <ListItemButton selected={selected} onClick={() => { setSelectedSession(session.session_id); setSelectedTraceId(null); setTracePage(1) }}>
+                            <ListItemText
+                              primary={session.session_id}
+                              secondary={`${session.trace_count} traces · ${session.annotated_count ?? 0} annotated${sessionEval ? ` · avg ${pct(sessionEval.average_score)}` : ''}`}
+                            />
+                          </ListItemButton>
+                        </Paper>
+                      </Box>
                     )
                   })}
                 </List>
@@ -514,6 +670,75 @@ export default function App() {
           </Box>
         </Stack>
       </Stack>
+
+      <Dialog open={exportDialogOpen} onClose={handleCloseExportDialog} fullWidth maxWidth="sm">
+        <DialogTitle>Export session bundle</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              Write the whole selected session to a local MLflow-oriented bundle. This stays on disk only — no tracking server calls.
+            </Typography>
+            <TextField label="Session id" value={activeExportSessionId} disabled fullWidth />
+            <Stack spacing={1.25}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25} alignItems={{ sm: 'flex-start' }}>
+                <TextField
+                  autoFocus={!nativeDirectoryPickerSupported}
+                  required
+                  label="Output folder"
+                  placeholder="/home/tore/exports/mlflow"
+                  value={exportOutputDir}
+                  onChange={handleExportOutputDirChange}
+                  fullWidth
+                />
+                {nativeDirectoryPickerSupported ? (
+                  <Button variant="outlined" onClick={handlePickExportFolder} disabled={exportLoading} sx={{ minWidth: { sm: 148 }, whiteSpace: 'nowrap', alignSelf: { sm: 'stretch' } }}>
+                    Choose folder
+                  </Button>
+                ) : null}
+              </Stack>
+              <Typography variant="caption" color="text.secondary">
+                {nativeDirectoryPickerSupported
+                  ? 'Prefer the native folder picker when your browser supports it. If the picker cannot expose the full filesystem path, paste it manually below.'
+                  : 'Your browser does not expose a native directory picker here, so paste the destination path manually.'}
+              </Typography>
+              {exportSelectedFolderLabel ? <Chip size="small" label={`Picked: ${exportSelectedFolderLabel}`} variant="outlined" sx={{ alignSelf: 'flex-start' }} /> : null}
+              {exportPickerMessage ? <Alert severity="info" variant="outlined">{exportPickerMessage}</Alert> : null}
+            </Stack>
+            <TextField
+              label="Bundle name"
+              placeholder="session-2026-03-31"
+              value={exportBundleName}
+              onChange={(event) => setExportBundleName(event.target.value)}
+              helperText="A subfolder with this name will be created inside the output folder."
+              fullWidth
+            />
+            <TextField
+              label="Optional tags"
+              placeholder="owner=tore\nenv=local"
+              value={exportTagText}
+              onChange={(event) => setExportTagText(event.target.value)}
+              helperText="Use key=value pairs, one per line or comma-separated."
+              multiline
+              minRows={3}
+              fullWidth
+            />
+            {Object.keys(parsedExportTags).length ? (
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                {Object.entries(parsedExportTags).map(([key, value]) => (
+                  <Chip key={key} size="small" label={`${key}=${value}`} variant="outlined" />
+                ))}
+              </Stack>
+            ) : null}
+            {exportError ? <Alert severity="error" variant="outlined">{exportError}</Alert> : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseExportDialog} disabled={exportLoading}>Cancel</Button>
+          <Button onClick={handleSubmitExport} variant="contained" disabled={exportLoading || !activeExportSessionId}>
+            {exportLoading ? 'Exporting…' : 'Export session'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }
