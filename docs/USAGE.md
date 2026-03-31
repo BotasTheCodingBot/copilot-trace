@@ -48,7 +48,25 @@
    - The Evaluation page surfaces heuristic scores per session/trace plus explicit status explanations, score bands, and sortable history.
    - Dashboard shows aggregated metrics and low-score triage.
 
-6. **Automated usage**
+6. **Import a bundle into MLflow (optional)**
+   ```bash
+   cd copilot-trace
+   . .venv/bin/activate
+   pip install mlflow
+   python scripts/import_bundle_to_mlflow.py \
+       /path/to/export-root/copilot-session-export \
+       --tracking-uri file:$(pwd)/out/mlruns \
+       --experiment-name copilot-trace
+   ```
+   - The importer reads the exported bundle files plus `mlflow-run.json` and creates a real MLflow run.
+   - Exported tags, params, and numeric metrics are logged to MLflow.
+   - The whole bundle directory is uploaded as artifacts under `copilot_trace_bundle/` unless you override `--artifact-path`.
+   - Useful flags:
+     - `--run-name my-session-run` to override the exported run name
+     - `--artifact-path raw_bundle` to change the artifact subdirectory
+     - `--no-set-terminated` if you want to leave lifecycle handling to another process
+
+7. **Automated usage**
    - `make install` sets up deps (`pip install -r requirements.txt`, `npm ci` inside `ui`).
    - `make test` runs Python and UI tests.
    - `make build` builds both Python package and UI.

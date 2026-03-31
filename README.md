@@ -113,6 +113,19 @@ npm run dev -- --host 0.0.0.0 --port 5173
 
 Open <http://localhost:5173/#/parser>. The Parser page keeps the paged timeline front and center, with the selected trace docked beside it so payload and evaluation context stay visible while you move through the session. The trace timeline header also exposes an **Export session** action for the currently selected session, writing an MLflow-oriented JSON bundle to a local folder you choose.
 
+### 4) Import an exported bundle into MLflow
+```bash
+cd copilot-trace
+. .venv/bin/activate
+pip install mlflow
+python scripts/import_bundle_to_mlflow.py \
+  /path/to/export-root/copilot-session-export \
+  --tracking-uri file:$(pwd)/out/mlruns \
+  --experiment-name copilot-trace
+```
+
+That importer creates a local MLflow run, mirrors the exported tags/params/metrics from `mlflow-run.json`, and uploads the whole bundle directory as run artifacts under `copilot_trace_bundle/` by default.
+
 ## UI routes
 The UI uses hash routes so you can deep-link without needing server-side rewrite rules:
 
@@ -140,6 +153,7 @@ make ingest INPUT=/path/to/sessions
 - `./scripts/ingest.sh --input /path/to/sessions`
 - `./scripts/run-api.sh --db out/traces.db --host 0.0.0.0 --port 8000`
 - `./scripts/run-ui.sh --host 0.0.0.0 --port 5173`
+- `python scripts/import_bundle_to_mlflow.py /path/to/exported-bundle --tracking-uri file:$(pwd)/out/mlruns --experiment-name copilot-trace`
 
 ## Validation
 
@@ -176,6 +190,7 @@ This repo is close to “shareable side-project” territory, but a couple of pu
 - `requirements.txt` is intentionally small and geared toward local development.
 - Python runtime dependencies live in `pyproject.toml`.
 - `requirements.txt` installs the package in editable mode so the `copilot-trace` CLI is available immediately.
+- MLflow is optional and only needed when you want to import exported bundles into a local/remote tracking store (`pip install mlflow`).
 - UI dependency versions are locked in `ui/package-lock.json`.
 
 ## Screenshots

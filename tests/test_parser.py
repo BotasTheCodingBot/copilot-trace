@@ -12,6 +12,8 @@ import msgpack
 from parser.api import create_server
 from parser.cli import main as cli_main
 from parser.copilot_parser import CopilotSessionParser
+from parser.mlflow_export import MlflowExportConfig, MlflowSessionBundle, export_session_to_mlflow_bundle
+from parser.mlflow_import import MlflowImportConfig, MlflowImportError, import_bundle_to_mlflow, load_bundle
 from parser.storage import TraceStorageManager
 
 
@@ -259,6 +261,128 @@ class CopilotParserTests(unittest.TestCase):
             self.assertEqual(config['db_path'], str(db_path))
             self.assertEqual(config['json_path'], str(json_path))
             self.assertEqual(config['last_inputs'], [str(self.session_dir)])
+
+
+class _FakeRunInfo:
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+
+
+class _FakeRun:
+    def __init__(self, run_id: str):
+        self.info = _FakeRunInfo(run_id)
+
+
+class _FakeMlflow:
+    def __init__(self) -> None:
+        self.tracking_uri = None
+        self.experiment_name = None
+        self.started_run_name = None
+        self.tags = None
+        self.params = None
+        self.metrics: list[tuple[str, float]] = []
+        self.artifacts = None
+        self.ended_status = None
+
+    def set_tracking_uri(self, tracking_uri: str) -> None:
+        self.tracking_uri = tracking_uri
+
+    def set_experiment(self, experiment_name: str) -> None:
+        self.experiment_name = experiment_name
+
+    def start_run(self, run_name: str | None = None):
+        self.started_run_name = run_name
+        return _FakeRun('run-123')
+
+    def set_tags(self, tags: dict[str, str]) -> None:
+        self.tags = tags
+
+    def log_params(self, params: dict[str, str]) -> None:
+        self.params = params
+
+    def log_metric(self, key: str, value: float) -> None:
+        self.metrics.append((key, value))
+
+    def log_artifacts(self, local_dir: str, artifact_path: str | None = None) -> None:
+        self.artifacts = (local_dir, artifact_path)
+
+    def end_run(self, status: str = 'FINISHED') -> None:
+        self.ended_status = status
+
+
+class MlflowImportTests(unittest.TestCase):
+    def _write_bundle(self, root: Path) -> Path:
+        bundle = MlflowSessionBundle(
+            session={
+                'session_id': 'session-123',
+                'first_timestamp': '2026-03-31T10:00:00Z',
+                'last_timestamp': '2026-03-31T10:05:00Z',
+                'annotated_count': 2,
+            },
+            traces=[
+                {'id': 'trace-1', 'session_id': 'session-123', 'text': 'Hello'},
+                {'id': 'trace-2', 'session_id': 'session-123', 'function_name': 'tool.run'},
+            ],
+            evaluations=[
+                {'id': 'eval-1', 'session_id': 'session-123', 'score': 0.8, 'status': 'ok'},
+            ],
+            evaluation_summary={'average_score': 0.8, 'status_breakdown': {'ok': 1}},
+        )
+        export = export_session_to_mlflow_bundle(
+            bundle=bundle,
+            config=MlflowExportConfig(
+                output_dir=str(root),
+                bundle_name='bundle-under-test',
+                extra_tags={'env': 'test'},
+            ),
+        )
+        return Path(export['bundle_dir'])
+
+    def test_load_bundle_reads_exported_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = self._write_bundle(Path(tmp))
+            bundle = load_bundle(bundle_dir)
+            self.assertEqual(bundle.manifest['format'], 'copilot-trace.mlflow-bundle')
+            self.assertEqual(bundle.session['session_id'], 'session-123')
+            self.assertEqual(bundle.traces_payload['count'], 2)
+            self.assertEqual(bundle.evaluations_payload['count'], 1)
+            self.assertEqual(bundle.run_payload['run_name'], 'bundle-under-test')
+
+    def test_import_bundle_logs_run_metadata_and_artifacts(self):
+        fake_mlflow = _FakeMlflow()
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = self._write_bundle(Path(tmp))
+            result = import_bundle_to_mlflow(
+                config=MlflowImportConfig(
+                    bundle_dir=str(bundle_dir),
+                    tracking_uri='file:///tmp/mlruns',
+                    experiment_name='copilot-trace',
+                ),
+                mlflow_module=fake_mlflow,
+            )
+
+            self.assertEqual(result['status'], 'IMPORTED')
+            self.assertEqual(result['run_id'], 'run-123')
+            self.assertEqual(fake_mlflow.tracking_uri, 'file:///tmp/mlruns')
+            self.assertEqual(fake_mlflow.experiment_name, 'copilot-trace')
+            self.assertEqual(fake_mlflow.started_run_name, 'bundle-under-test')
+            self.assertEqual(fake_mlflow.params['session_id'], 'session-123')
+            self.assertIn('trace_count', dict(fake_mlflow.metrics))
+            self.assertEqual(fake_mlflow.artifacts, (str(bundle_dir), 'copilot_trace_bundle'))
+            self.assertEqual(fake_mlflow.tags['env'], 'test')
+            self.assertEqual(fake_mlflow.tags['copilot_trace.bundle_format'], 'copilot-trace.mlflow-bundle')
+            self.assertEqual(fake_mlflow.ended_status, 'FINISHED')
+
+    def test_load_bundle_rejects_unknown_manifest_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = self._write_bundle(Path(tmp))
+            manifest_path = bundle_dir / 'manifest.json'
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            manifest['format'] = 'not-supported'
+            manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+
+            with self.assertRaises(MlflowImportError):
+                load_bundle(bundle_dir)
 
 
 if __name__ == '__main__':
