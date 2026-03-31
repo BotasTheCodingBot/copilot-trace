@@ -325,7 +325,7 @@ def _normalize_native_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
         end_time_ns = span.get('end_time_ns')
         if not isinstance(start_time_ns, (int, float)) or int(start_time_ns) <= 0:
             start_time_ns = fallback_ts + index
-        if not isinstance(end_time_ns, (int, float)) or int(end_time_ns) < int(start_time_ns):
+        if not isinstance(end_time_ns, (int, float)) or int(end_time_ns) <= int(start_time_ns):
             end_time_ns = int(start_time_ns) + 1
         normalized_spans.append(
             {

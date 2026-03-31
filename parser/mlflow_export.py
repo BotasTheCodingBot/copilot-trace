@@ -207,7 +207,7 @@ def _build_native_trace_payload(*, bundle: MlflowSessionBundle, bundle_name: str
             'copilot_trace.parent_reason': trace.get('parent_reason'),
             'copilot_trace.tool_call_id': trace.get('tool_call_id'),
             'copilot_trace.tags': trace.get('tags') or [],
-            'copilot_trace.raw': trace,
+            **_trace_payload_attributes(trace),
         }
         spans.append(
             {
@@ -278,6 +278,49 @@ def _with_inferred_trace_parents(traces: list[dict[str, Any]]) -> list[dict[str,
         )
     return enriched
 
+
+
+def _trace_payload_attributes(trace: dict[str, Any]) -> dict[str, Any]:
+    raw_value = trace.get('raw')
+    raw_preview_value = trace.get('raw_preview')
+    sanitized = {
+        str(key): value
+        for key, value in trace.items()
+        if key not in {'raw', 'raw_preview'} and value not in (None, '', [], {})
+    }
+
+    attributes: dict[str, Any] = {}
+    preview_source = sanitized
+    if raw_value not in (None, '', [], {}):
+        attributes['copilot_trace.raw_present'] = True
+        attributes['copilot_trace.raw_type'] = type(raw_value).__name__
+        attributes['copilot_trace.raw_size'] = len(_json_dump_compact(raw_value))
+        preview_source = {**sanitized, 'raw': _compact_blob_preview(raw_value)}
+    if raw_preview_value not in (None, '', [], {}):
+        attributes['copilot_trace.raw_preview_present'] = True
+        attributes['copilot_trace.raw_preview_type'] = type(raw_preview_value).__name__
+        attributes['copilot_trace.raw_preview_size'] = len(_json_dump_compact(raw_preview_value))
+        if 'raw_preview' not in preview_source:
+            preview_source = {**preview_source, 'raw_preview': _compact_blob_preview(raw_preview_value)}
+
+    attributes['copilot_trace.preview'] = _string_limit(_json_dump_compact(preview_source), 1200)
+    return attributes
+
+
+def _compact_blob_preview(value: Any) -> Any:
+    safe = _json_safe(value)
+    if isinstance(safe, dict):
+        items = list(safe.items())
+        return {str(key): _compact_blob_preview(item) for key, item in items[:8]}
+    if isinstance(safe, list):
+        return [_compact_blob_preview(item) for item in safe[:8]]
+    if isinstance(safe, str):
+        return _string_limit(safe, 300)
+    return safe
+
+
+def _json_dump_compact(value: Any) -> str:
+    return json.dumps(_json_safe(value), ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 def _trace_span_name(trace: dict[str, Any]) -> str:
     return str(
@@ -410,7 +453,7 @@ def _normalize_native_spans(spans: list[dict[str, Any]], *, root_span_id: str) -
         start_ns = int(base_start) if isinstance(base_start, (int, float)) and int(base_start) > 0 else time_seed + index
         base_end = span.get('end_time_ns')
         end_ns = int(base_end) if isinstance(base_end, (int, float)) and int(base_end) > 0 else start_ns + 1
-        if end_ns < start_ns:
+        if end_ns <= start_ns:
             end_ns = start_ns + 1
 
         span['start_time_ns'] = start_ns

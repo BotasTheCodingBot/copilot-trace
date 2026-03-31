@@ -14,7 +14,7 @@ from parser.api import create_server
 from parser.cli import main as cli_main
 from parser.copilot_parser import CopilotSessionParser
 from parser.mlflow_export import MlflowExportConfig, MlflowSessionBundle, export_session_to_mlflow_bundle
-from parser.mlflow_import import MlflowImportConfig, MlflowImportError, import_bundle_to_mlflow, load_bundle
+from parser.mlflow_import import MlflowImportConfig, MlflowImportError, _normalize_native_trace_payload, import_bundle_to_mlflow, load_bundle
 from parser.storage import TraceStorageManager
 
 
@@ -518,9 +518,11 @@ class MlflowImportTests(unittest.TestCase):
                 spans_by_id['trace-2']['start_time_ns'],
                 spans_by_id['trace-3']['start_time_ns'],
             )
-            self.assertEqual(spans_by_id['trace-2']['end_time_ns'], spans_by_id['trace-2']['start_time_ns'])
-            self.assertEqual(spans_by_id['trace-3']['end_time_ns'], spans_by_id['trace-3']['start_time_ns'])
-            self.assertIsInstance(spans_by_id['trace-2']['attributes']['copilot_trace.raw'], str)
+            self.assertEqual(spans_by_id['trace-2']['end_time_ns'], spans_by_id['trace-2']['start_time_ns'] + 1)
+            self.assertEqual(spans_by_id['trace-3']['end_time_ns'], spans_by_id['trace-3']['start_time_ns'] + 1)
+            self.assertNotIn('copilot_trace.raw', spans_by_id['trace-2']['attributes'])
+            self.assertTrue(spans_by_id['trace-2']['attributes']['copilot_trace.raw_present'])
+            self.assertIn('raw', spans_by_id['trace-2']['attributes']['copilot_trace.preview'])
             self.assertIsInstance(spans_by_id['trace-1']['events'][0]['attributes']['notes'], str)
 
     def test_import_bundle_logs_run_metadata_and_artifacts(self):
@@ -559,10 +561,32 @@ class MlflowImportTests(unittest.TestCase):
             self.assertTrue(all(span.end_calls[0]['end_time_ns'] >= span.start_time_ns for span in fake_mlflow.created_spans))
             self.assertEqual(fake_mlflow.created_spans[2].inputs, {'query': 'hello'})
             self.assertEqual(fake_mlflow.created_spans[3].end_calls[0]['outputs'], {'ok': True, 'items': [1, 2, 3]})
-            self.assertIsInstance(fake_mlflow.created_spans[2].attributes['copilot_trace.raw'], str)
+            self.assertNotIn('copilot_trace.raw', fake_mlflow.created_spans[2].attributes)
+            self.assertTrue(fake_mlflow.created_spans[2].attributes['copilot_trace.raw_present'])
+            self.assertIn('raw', fake_mlflow.created_spans[2].attributes['copilot_trace.preview'])
             self.assertEqual(fake_mlflow.created_spans[1].events[0].name, 'copilot.notes')
             self.assertIsInstance(fake_mlflow.created_spans[1].events[0].attributes['notes'], str)
             self.assertEqual(fake_mlflow.ended_status, 'FINISHED')
+
+
+    def test_import_normalizes_zero_length_spans_to_minimal_duration(self):
+        payload = {
+            'root_span_id': 'root',
+            'spans': [
+                {
+                    'id': 'root',
+                    'name': 'root',
+                    'start_time_ns': 100,
+                    'end_time_ns': 100,
+                    'attributes': {},
+                    'events': [],
+                }
+            ],
+        }
+
+        normalized = _normalize_native_trace_payload(payload)
+        self.assertEqual(normalized['spans'][0]['start_time_ns'], 100)
+        self.assertEqual(normalized['spans'][0]['end_time_ns'], 101)
 
     def test_load_bundle_rejects_unknown_manifest_format(self):
         with tempfile.TemporaryDirectory() as tmp:
