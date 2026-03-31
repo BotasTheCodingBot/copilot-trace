@@ -23,9 +23,8 @@ Copilot exports are messy, deeply nested, and annoying to inspect by hand. `copi
 - persisted storage config in `out/copilot-trace-config.json`
 - API-backed filtering, paging, timeline sort order, parent/sequence metadata, and trace annotation writes
 - trace-level evaluation context surfaced directly in the UI, including score bands and status explanations
-- clickable trace tree on the Parser page so message → tool call → tool result flows are easier to follow
-- branch expand/collapse controls plus labeled edges (`invokes`, `returns`, etc.) so dense sessions stay readable
-- full-screen trace detail view for inspecting long payloads without fighting the sidebar layout
+- timeline-first Parser page with the selected trace docked beside the event stream for faster review
+- inline payload inspection that keeps the current timeline slice and active trace visible together
 - hash-based page routing (`#/parser`, `#/evaluation`, `#/dashboard`) so direct links survive static hosting
 - sample fallback data loaded as a separate asset instead of being bundled into the main JS chunk
 
@@ -36,8 +35,8 @@ copilot-trace/
 ├── tests/          # Python parser/API/CLI tests
 ├── ui/             # React + Vite frontend
 ├── scripts/        # install/run/ingest helpers
-├── docs/           # notes and publishing plan
-├── screenshots/    # UI captures
+├── docs/           # notes and usage docs
+├── screenshots/    # current UI captures for README/social use
 ├── out/            # generated sqlite/json/config outputs (local only)
 ├── Makefile        # common automation entrypoints
 └── pyproject.toml  # package metadata
@@ -112,7 +111,7 @@ cd ui
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-Open <http://localhost:5173/#/parser>. The Parser page now includes both the paged timeline and a trace tree that mirrors parent/child execution flow. Tree branches can be collapsed/expanded, edge labels explain the relationship between nodes, and the selected trace can be opened in a dedicated full-screen detail view.
+Open <http://localhost:5173/#/parser>. The Parser page keeps the paged timeline front and center, with the selected trace docked beside it so payload and evaluation context stay visible while you move through the session.
 
 ## UI routes
 The UI uses hash routes so you can deep-link without needing server-side rewrite rules:
@@ -128,7 +127,7 @@ Selected session and filter state are mirrored into the URL query string where p
 ### Common commands
 ```bash
 make install      # create venv + install Python and UI deps
-make test         # run Python unit tests
+make test         # run Python + UI tests
 make build        # build Python package + UI bundle
 make package      # build Python distribution artifacts
 make run-api      # run the local API server
@@ -163,13 +162,13 @@ This repo is close to “shareable side-project” territory, but a couple of pu
 - choose a license
 - decide whether to keep example trace exports in-repo or generate them during release prep
 - decide whether GitHub Pages, static hosting, or local-only hosting is the intended UI delivery model
-- add a real screenshot set for README/social cards if this is going public
+- keep only the current screenshot set that matches the shipped UI
 
 ### Suggested release checklist
 1. Run `make test`
 2. Run `make build`
 3. Confirm the UI works against both live API and sample fallback
-4. Regenerate screenshots if the UI changed
+4. Refresh screenshots only when the current UI meaningfully changes
 5. Pick a license before making the repo public
 6. Push to GitHub and add a short project description + topics
 
@@ -180,4 +179,4 @@ This repo is close to “shareable side-project” territory, but a couple of pu
 - UI dependency versions are locked in `ui/package-lock.json`.
 
 ## Screenshots
-Current captures live in `screenshots/`, including `trace-tree-parser-page.png` for the parser tree view.
+Current captures live in `screenshots/` for the active parser/evaluation/dashboard experience.

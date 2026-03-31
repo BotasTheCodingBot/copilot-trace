@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from parser.copilot_parser import CopilotSessionParser, TraceRow
+from parser.mlflow_export import MlflowExportError, MlflowRestClient, config_from_payload, export_trace_to_mlflow
 
 
 class TraceRepository:
@@ -347,7 +348,7 @@ class TraceApiHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(HTTPStatus.NO_CONTENT)
         self._write_cors_headers()
-        self.send_header('Access-Control-Allow-Methods', 'GET, PATCH, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
@@ -427,6 +428,41 @@ class TraceApiHandler(BaseHTTPRequestHandler):
             return
 
         self._write_json({'error': 'not found', 'path': parsed.path}, status=HTTPStatus.NOT_FOUND)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith('/api/traces/') or not parsed.path.endswith('/export/mlflow'):
+            self._write_json({'error': 'not found', 'path': parsed.path}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        trace_id = parsed.path[len('/api/traces/') : -len('/export/mlflow')].rstrip('/')
+        if not trace_id:
+            self._write_json({'error': 'trace id is required'}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        payload = self._read_json_body()
+        if payload is None:
+            self._write_json({'error': 'invalid json body'}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        trace = self.repository.get_trace(trace_id)
+        if trace is None:
+            self._write_json({'error': 'trace not found', 'id': trace_id}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        try:
+            config = config_from_payload(payload)
+            result = export_trace_to_mlflow(
+                client=MlflowRestClient(config.tracking_uri),
+                trace=trace,
+                config=config,
+                evaluation_summary=self.repository.evaluation_summary_for_trace_ids([trace_id]),
+            )
+        except MlflowExportError as exc:
+            self._write_json({'error': str(exc), 'id': trace_id}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        self._write_json({'ok': True, 'trace_id': trace_id, 'export': result}, status=HTTPStatus.CREATED)
 
     def do_PATCH(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

@@ -14,12 +14,12 @@ JSON ?= out/traces.json
 INPUT ?=
 ROOT_DIR ?= $(CURDIR)
 
-.PHONY: help install install-python install-ui test test-python build build-python build-ui package run-api run-ui ingest clean
+.PHONY: help install install-python install-ui test test-python test-ui build build-python build-ui package run-api run-ui ingest clean
 
 help:
 	@echo "Targets:"
 	@echo "  make install         # create venv + install Python and UI deps"
-	@echo "  make test            # run Python tests"
+	@echo "  make test            # run Python + UI tests"
 	@echo "  make build           # build Python package + UI bundle"
 	@echo "  make package         # build Python distribution artifacts"
 	@echo "  make run-api         # run the local API server"
@@ -35,10 +35,13 @@ install-python:
 install-ui:
 	cd $(UI_DIR) && $(NPM) ci
 
-test: test-python
+test: test-python test-ui
 
 test-python:
 	$(PY) -m unittest discover -s tests -v
+
+test-ui:
+	cd $(UI_DIR) && $(NPM) run test
 
 build: build-python build-ui
 
@@ -61,6 +64,7 @@ ingest:
 	./scripts/ingest.sh --input "$(INPUT)" --db $(DB) --json $(JSON)
 
 clean:
-	rm -rf build dist *.egg-info $(UI_DIR)/dist
+	rm -rf build dist *.egg-info $(UI_DIR)/dist $(UI_DIR)/coverage
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	find . -type f -name '*.pyc' -delete
+	find $(UI_DIR) -type f -name '*.tsbuildinfo' -delete
