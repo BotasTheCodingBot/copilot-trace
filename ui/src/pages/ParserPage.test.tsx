@@ -1,6 +1,6 @@
 import ReactDOMServer from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import ParserPage, { parseMlflowTags } from './ParserPage'
+import ParserPage from './ParserPage'
 import type { Trace } from '../types'
 
 const trace: Trace = {
@@ -13,15 +13,8 @@ const trace: Trace = {
   tags: ['copilot'],
 }
 
-describe('parseMlflowTags', () => {
-  it('parses key value tags from new lines and commas', () => {
-    expect(parseMlflowTags('env=local, team=ai\nowner=tore\ninvalid\nempty='))
-      .toEqual({ env: 'local', team: 'ai', owner: 'tore' })
-  })
-})
-
 describe('ParserPage', () => {
-  it('renders MLflow export action for the selected trace panel', () => {
+  it('renders the timeline and selected trace details without trace export controls', () => {
     const html = ReactDOMServer.renderToString(
       <ParserPage
         availableTags={['copilot']}
@@ -48,8 +41,9 @@ describe('ParserPage', () => {
       />,
     )
 
-    expect(html).toContain('Export to MLflow')
+    expect(html).toContain('Trace timeline')
     expect(html).toContain('Selected trace')
     expect(html).toContain('Trace payload')
+    expect(html).not.toContain('Export to MLflow')
   })
 })

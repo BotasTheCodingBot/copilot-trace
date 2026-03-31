@@ -4,8 +4,6 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -17,71 +15,11 @@ from parser.copilot_parser import CopilotSessionParser
 from parser.storage import TraceStorageManager
 
 
-class _FakeMlflowHandler(BaseHTTPRequestHandler):
-    experiments: dict[str, str] = {}
-    created_runs: list[dict] = []
-    logged_batches: list[dict] = []
-    updated_runs: list[dict] = []
-
-    def do_GET(self):  # noqa: N802
-        if self.path.startswith('/api/2.0/mlflow/experiments/get-by-name'):
-            from urllib.parse import parse_qs, urlparse
-
-            name = parse_qs(urlparse(self.path).query).get('experiment_name', [''])[0]
-            experiment_id = self.experiments.get(name)
-            if experiment_id:
-                self._write_json({'experiment': {'experiment_id': experiment_id, 'name': name}})
-                return
-            self._write_json({'error_code': 'RESOURCE_DOES_NOT_EXIST'}, status=HTTPStatus.NOT_FOUND)
-            return
-        self._write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
-
-    def do_POST(self):  # noqa: N802
-        length = int(self.headers.get('Content-Length', '0') or '0')
-        payload = json.loads(self.rfile.read(length).decode('utf-8')) if length else {}
-
-        if self.path == '/api/2.0/mlflow/experiments/create':
-            experiment_id = str(len(self.experiments) + 1)
-            self.experiments[payload['name']] = experiment_id
-            self._write_json({'experiment_id': experiment_id})
-            return
-        if self.path == '/api/2.0/mlflow/runs/create':
-            run_id = f"run-{len(self.created_runs) + 1}"
-            run = {'info': {'run_id': run_id}, 'data': {'tags': payload.get('tags', [])}}
-            self.created_runs.append(payload)
-            self._write_json({'run': run})
-            return
-        if self.path == '/api/2.0/mlflow/runs/log-batch':
-            self.logged_batches.append(payload)
-            self._write_json({})
-            return
-        if self.path == '/api/2.0/mlflow/runs/update':
-            self.updated_runs.append(payload)
-            self._write_json({'run_info': {'run_id': payload['run_id'], 'status': payload['status']}})
-            return
-        self._write_json({'error': 'not found'}, status=HTTPStatus.NOT_FOUND)
-
-    def log_message(self, format, *args):  # noqa: A003
-        return
-
-    def _write_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK):
-        body = json.dumps(payload).encode('utf-8')
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-
 class CopilotParserTests(unittest.TestCase):
     def setUp(self) -> None:
         self.parser = CopilotSessionParser()
         self.session_dir = Path(__file__).resolve().parents[2] / 'copilot-logs' / 'Okonomi' / 'copilot-chat' / '539fc419' / 'sessions'
         self.session_file = self.session_dir / '0acbeb4f-989a-4a77-bf2d-28b0b71d954b'
-        _FakeMlflowHandler.experiments = {}
-        _FakeMlflowHandler.created_runs = []
-        _FakeMlflowHandler.logged_batches = []
-        _FakeMlflowHandler.updated_runs = []
 
     def test_parse_real_session_file_returns_rows(self):
         rows = self.parser.parse_session_file(self.session_file)
@@ -213,30 +151,27 @@ class CopilotParserTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
-    def test_api_exports_selected_trace_to_mlflow_run_via_rest(self):
+    def test_api_exports_selected_session_to_local_mlflow_bundle(self):
         rows = self.parser.parse_session_file(self.session_file)
         with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / 'traces.db'
+            tmp_path = Path(tmp)
+            db_path = tmp_path / 'traces.db'
+            export_root = tmp_path / 'exports'
             self.parser.export_sqlite(rows, db_path)
 
             api_server = create_server(db_path=db_path, host='127.0.0.1', port=0)
             api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
             api_thread.start()
-
-            mlflow_server = ThreadingHTTPServer(('127.0.0.1', 0), _FakeMlflowHandler)
-            mlflow_thread = threading.Thread(target=mlflow_server.serve_forever, daemon=True)
-            mlflow_thread.start()
             try:
                 api_base = f'http://127.0.0.1:{api_server.server_address[1]}'
-                mlflow_base = f'http://127.0.0.1:{mlflow_server.server_address[1]}'
-                traces_payload = json.loads(urlopen(f'{api_base}/api/traces?limit=3&offset=0&include_evaluations=true').read().decode('utf-8'))
-                trace_id = traces_payload['traces'][0]['id']
+                sessions_payload = json.loads(urlopen(f'{api_base}/api/traces/sessions?limit=1&offset=0').read().decode('utf-8'))
+                session_id = sessions_payload['sessions'][0]['session_id']
 
                 export_request = Request(
-                    f'{api_base}/api/traces/{trace_id}/export/mlflow',
+                    f'{api_base}/api/traces/sessions/{session_id}/export/mlflow',
                     data=json.dumps({
-                        'tracking_uri': mlflow_base,
-                        'experiment_name': 'copilot-trace-tests',
+                        'output_dir': str(export_root),
+                        'bundle_name': 'copilot-session-export',
                         'tags': {'env': 'test'},
                     }).encode('utf-8'),
                     headers={'Content-Type': 'application/json'},
@@ -244,39 +179,33 @@ class CopilotParserTests(unittest.TestCase):
                 )
                 export_payload = json.loads(urlopen(export_request).read().decode('utf-8'))
                 self.assertTrue(export_payload['ok'])
-                self.assertEqual(export_payload['trace_id'], trace_id)
-                self.assertEqual(export_payload['export']['tracking_uri'], mlflow_base)
-                self.assertEqual(export_payload['export']['experiment_id'], '1')
-                self.assertEqual(export_payload['export']['status'], 'FINISHED')
+                self.assertEqual(export_payload['session_id'], session_id)
+                self.assertEqual(export_payload['export']['bundle_name'], 'copilot-session-export')
+                self.assertEqual(export_payload['export']['status'], 'WRITTEN')
 
-                self.assertEqual(len(_FakeMlflowHandler.created_runs), 1)
-                create_payload = _FakeMlflowHandler.created_runs[0]
-                self.assertEqual(create_payload['experiment_id'], '1')
-                create_tags = {item['key']: item['value'] for item in create_payload['tags']}
-                self.assertEqual(create_tags['source'], 'copilot-trace')
-                self.assertEqual(create_tags['trace.id'], trace_id)
-                self.assertEqual(create_tags['env'], 'test')
+                bundle_dir = export_root / 'copilot-session-export'
+                self.assertTrue((bundle_dir / 'manifest.json').exists())
+                self.assertTrue((bundle_dir / 'session.json').exists())
+                self.assertTrue((bundle_dir / 'traces.json').exists())
+                self.assertTrue((bundle_dir / 'evaluations.json').exists())
+                self.assertTrue((bundle_dir / 'mlflow-run.json').exists())
 
-                self.assertEqual(len(_FakeMlflowHandler.logged_batches), 1)
-                batch_payload = _FakeMlflowHandler.logged_batches[0]
-                batch_params = {item['key']: item['value'] for item in batch_payload.get('params', [])}
-                self.assertEqual(batch_params['trace_id'], trace_id)
-                self.assertIn('session_id', batch_params)
-                batch_tags = {item['key']: item['value'] for item in batch_payload.get('tags', [])}
-                self.assertIn('trace.preview', batch_tags)
-                self.assertIn('trace.payload', batch_tags)
-                batch_metrics = {item['key']: item['value'] for item in batch_payload.get('metrics', [])}
-                self.assertIn('evaluation_count', batch_metrics)
+                manifest_payload = json.loads((bundle_dir / 'manifest.json').read_text(encoding='utf-8'))
+                self.assertEqual(manifest_payload['session_id'], session_id)
+                traces_payload = json.loads((bundle_dir / 'traces.json').read_text(encoding='utf-8'))
+                self.assertGreater(traces_payload['count'], 0)
+                self.assertTrue(all(trace['session_id'] == session_id for trace in traces_payload['traces']))
 
-                self.assertEqual(len(_FakeMlflowHandler.updated_runs), 1)
-                self.assertEqual(_FakeMlflowHandler.updated_runs[0]['status'], 'FINISHED')
+                run_payload = json.loads((bundle_dir / 'mlflow-run.json').read_text(encoding='utf-8'))
+                self.assertEqual(run_payload['run_name'], 'copilot-session-export')
+                self.assertEqual(run_payload['tags']['env'], 'test')
+                self.assertEqual(run_payload['params']['session_id'], session_id)
+                self.assertIn('trace_count', run_payload['metrics'])
             finally:
                 api_server.shutdown()
                 api_server.server_close()
                 api_thread.join(timeout=2)
-                mlflow_server.shutdown()
-                mlflow_server.server_close()
-                mlflow_thread.join(timeout=2)
+
 
     def test_storage_manager_rotates_existing_db_and_updates_config(self):
         with tempfile.TemporaryDirectory() as tmp:

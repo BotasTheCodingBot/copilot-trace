@@ -1,13 +1,8 @@
-import { useMemo, useState } from 'react'
 import {
   Alert,
   Box,
   Button,
   Chip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
   Divider,
   List,
   ListItemButton,
@@ -20,7 +15,7 @@ import {
   Typography,
 } from '@mui/material'
 import JsonViewer from '../components/JsonViewer'
-import { API_BASE, TRACE_PAGE_SIZE } from '../lib/appConfig'
+import { TRACE_PAGE_SIZE } from '../lib/appConfig'
 import { pct, safeText, SectionCard, toneForStatus, toneForType, formatMetricLabel, describeEvalStatus } from '../lib/appUtils'
 import type { Evaluation, Trace } from '../types'
 
@@ -89,65 +84,8 @@ export default function ParserPage({
   traces,
   tracesTotal,
 }: ParserPageProps) {
-  const [exportDialogOpen, setExportDialogOpen] = useState(false)
-  const [trackingUri, setTrackingUri] = useState('')
-  const [experimentName, setExperimentName] = useState('copilot-trace')
-  const [tagText, setTagText] = useState('')
-  const [exportLoading, setExportLoading] = useState(false)
-  const [exportError, setExportError] = useState<string | null>(null)
-  const [exportSuccess, setExportSuccess] = useState<string | null>(null)
 
-  const parsedTags = useMemo(() => parseMlflowTags(tagText), [tagText])
 
-  const handleOpenExportDialog = () => {
-    setExportError(null)
-    setExportSuccess(null)
-    setExportDialogOpen(true)
-  }
-
-  const handleCloseExportDialog = () => {
-    if (exportLoading) return
-    setExportDialogOpen(false)
-  }
-
-  const handleSubmitExport = async () => {
-    if (!selectedTrace) return
-    const normalizedTrackingUri = trackingUri.trim()
-    const normalizedExperimentName = experimentName.trim() || 'copilot-trace'
-
-    if (!normalizedTrackingUri) {
-      setExportError('Tracking URI is required.')
-      return
-    }
-
-    setExportLoading(true)
-    setExportError(null)
-    setExportSuccess(null)
-    try {
-      const response = await fetch(`${API_BASE}/api/traces/${selectedTrace.id}/export/mlflow`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tracking_uri: normalizedTrackingUri,
-          experiment_name: normalizedExperimentName,
-          tags: parsedTags,
-        }),
-      })
-      const payload = await response.json().catch(() => null)
-      if (!response.ok) {
-        throw new Error(payload?.error || `Export failed (${response.status})`)
-      }
-      const runId = payload?.export?.run_id
-      setExportSuccess(runId
-        ? `Exported to MLflow run ${runId} in experiment ${normalizedExperimentName}.`
-        : `Exported trace ${selectedTrace.id} to MLflow.`)
-      setExportDialogOpen(false)
-    } catch (error) {
-      setExportError(error instanceof Error ? error.message : 'Export failed')
-    } finally {
-      setExportLoading(false)
-    }
-  }
 
   return (
     <Stack spacing={3}>
@@ -243,15 +181,8 @@ export default function ParserPage({
                     <Chip size="small" label={new Date(selectedTrace.timestamp).toLocaleString()} variant="outlined" />
                     {selectedEvaluation ? <Chip size="small" label={`Eval ${pct(selectedEvaluation.score)}`} color={toneForStatus(selectedEvaluation.status) as any} variant="outlined" /> : null}
                   </Stack>
-                  <Box>
-                    <Button variant="contained" color="secondary" onClick={handleOpenExportDialog}>
-                      Export to MLflow
-                    </Button>
-                  </Box>
                 </Stack>
 
-                {exportSuccess ? <Alert severity="success" variant="outlined">{exportSuccess}</Alert> : null}
-                {exportError ? <Alert severity="error" variant="outlined">{exportError}</Alert> : null}
 
                 <Paper elevation={0} sx={{ p: 2, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(160,185,255,0.12)' }}>
                   <Stack spacing={1.25}>
@@ -296,57 +227,6 @@ export default function ParserPage({
           </SectionCard>
         </Box>
       </Stack>
-
-      <Dialog open={exportDialogOpen} onClose={handleCloseExportDialog} fullWidth maxWidth="sm">
-        <DialogTitle>Export to MLflow</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} sx={{ pt: 1 }}>
-            <Typography variant="body2" color="text.secondary">
-              Send the selected trace to an MLflow tracking server as a run. Keep it lightweight: server URL, experiment name, then optional tags.
-            </Typography>
-            <TextField
-              autoFocus
-              required
-              label="Tracking URI"
-              placeholder="http://127.0.0.1:5000"
-              value={trackingUri}
-              onChange={(event) => setTrackingUri(event.target.value)}
-              fullWidth
-            />
-            <TextField
-              label="Experiment name"
-              placeholder="copilot-trace"
-              value={experimentName}
-              onChange={(event) => setExperimentName(event.target.value)}
-              fullWidth
-            />
-            <TextField
-              label="Optional tags"
-              placeholder="env=local\nowner=tore"
-              value={tagText}
-              onChange={(event) => setTagText(event.target.value)}
-              helperText="Use key=value pairs, one per line or comma-separated."
-              multiline
-              minRows={3}
-              fullWidth
-            />
-            {Object.keys(parsedTags).length ? (
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                {Object.entries(parsedTags).map(([key, value]) => (
-                  <Chip key={key} size="small" label={`${key}=${value}`} variant="outlined" />
-                ))}
-              </Stack>
-            ) : null}
-            {exportError ? <Alert severity="error" variant="outlined">{exportError}</Alert> : null}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleCloseExportDialog} disabled={exportLoading}>Cancel</Button>
-          <Button onClick={handleSubmitExport} variant="contained" disabled={exportLoading || !selectedTrace}>
-            {exportLoading ? 'Exporting…' : 'Export trace'}
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Stack>
   )
 }

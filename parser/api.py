@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from parser.copilot_parser import CopilotSessionParser, TraceRow
-from parser.mlflow_export import MlflowExportError, MlflowRestClient, config_from_payload, export_trace_to_mlflow
+from parser.mlflow_export import MlflowExportError, MlflowSessionBundle, config_from_payload, export_session_to_mlflow_bundle
 
 
 class TraceRepository:
@@ -223,6 +223,58 @@ class TraceRepository:
         trace = self._row_to_trace_payload(row)
         return self._enrich_single_trace(trace)
 
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                '''
+                SELECT t.session_id,
+                       COUNT(*) AS trace_count,
+                       MIN(t.timestamp) AS first_timestamp,
+                       MAX(t.timestamp) AS last_timestamp,
+                       SUM(CASE WHEN json_extract(t.data, '$.notes') IS NOT NULL AND json_extract(t.data, '$.notes') != '' THEN 1 ELSE 0 END) AS annotated_count,
+                       es.data
+                FROM traces t
+                LEFT JOIN evaluation_sessions es ON es.session_id = t.session_id
+                WHERE t.session_id = ?
+                GROUP BY t.session_id, es.data
+                ''',
+                (session_id,),
+            ).fetchone()
+        if not row:
+            return None
+        payload = {
+            'session_id': row[0],
+            'trace_count': row[1],
+            'first_timestamp': row[2],
+            'last_timestamp': row[3],
+            'annotated_count': row[4],
+        }
+        if row[5]:
+            payload['evaluation'] = json.loads(row[5])
+        return payload
+
+    def get_session_bundle(self, session_id: str) -> MlflowSessionBundle | None:
+        session = self.get_session(session_id)
+        if session is None:
+            return None
+        with sqlite3.connect(self.db_path) as conn:
+            trace_rows = conn.execute(
+                'SELECT id, session_id, timestamp, trace_type, function_name, tags, data FROM traces WHERE session_id = ? ORDER BY timestamp ASC, id ASC',
+                (session_id,),
+            ).fetchall()
+            evaluation_rows = conn.execute(
+                'SELECT id, session_id, timestamp, target_trace_id, label, score, status, metrics, notes FROM evaluations WHERE session_id = ? ORDER BY timestamp ASC, id ASC',
+                (session_id,),
+            ).fetchall()
+        traces = self.parser.enrich_agent_traces([self._row_to_trace_payload(row) for row in trace_rows])
+        evaluations = [self._row_to_evaluation_payload(row) for row in evaluation_rows]
+        return MlflowSessionBundle(
+            session=session,
+            traces=traces,
+            evaluations=evaluations,
+            evaluation_summary=session.get('evaluation'),
+        )
+
     def update_trace_annotations(self, trace_id: str, *, tags: list[str] | None = None, notes: str | None = None) -> dict[str, Any] | None:
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute(
@@ -431,13 +483,13 @@ class TraceApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        if not parsed.path.startswith('/api/traces/') or not parsed.path.endswith('/export/mlflow'):
+        if not parsed.path.startswith('/api/traces/sessions/') or not parsed.path.endswith('/export/mlflow'):
             self._write_json({'error': 'not found', 'path': parsed.path}, status=HTTPStatus.NOT_FOUND)
             return
 
-        trace_id = parsed.path[len('/api/traces/') : -len('/export/mlflow')].rstrip('/')
-        if not trace_id:
-            self._write_json({'error': 'trace id is required'}, status=HTTPStatus.BAD_REQUEST)
+        session_id = parsed.path[len('/api/traces/sessions/') : -len('/export/mlflow')].rstrip('/')
+        if not session_id:
+            self._write_json({'error': 'session id is required'}, status=HTTPStatus.BAD_REQUEST)
             return
 
         payload = self._read_json_body()
@@ -445,24 +497,19 @@ class TraceApiHandler(BaseHTTPRequestHandler):
             self._write_json({'error': 'invalid json body'}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        trace = self.repository.get_trace(trace_id)
-        if trace is None:
-            self._write_json({'error': 'trace not found', 'id': trace_id}, status=HTTPStatus.NOT_FOUND)
+        session_bundle = self.repository.get_session_bundle(session_id)
+        if session_bundle is None:
+            self._write_json({'error': 'session not found', 'id': session_id}, status=HTTPStatus.NOT_FOUND)
             return
 
         try:
             config = config_from_payload(payload)
-            result = export_trace_to_mlflow(
-                client=MlflowRestClient(config.tracking_uri),
-                trace=trace,
-                config=config,
-                evaluation_summary=self.repository.evaluation_summary_for_trace_ids([trace_id]),
-            )
+            result = export_session_to_mlflow_bundle(bundle=session_bundle, config=config)
         except MlflowExportError as exc:
-            self._write_json({'error': str(exc), 'id': trace_id}, status=HTTPStatus.BAD_REQUEST)
+            self._write_json({'error': str(exc), 'id': session_id}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        self._write_json({'ok': True, 'trace_id': trace_id, 'export': result}, status=HTTPStatus.CREATED)
+        self._write_json({'ok': True, 'session_id': session_id, 'export': result}, status=HTTPStatus.CREATED)
 
     def do_PATCH(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
