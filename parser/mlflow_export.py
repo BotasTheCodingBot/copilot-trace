@@ -309,25 +309,6 @@ def _normalize_native_spans(spans: list[dict[str, Any]], *, root_span_id: str) -
     if root_span_id not in spans_by_id:
         raise MlflowExportError(f'Native trace root span is missing: {root_span_id}')
 
-    children_by_parent: dict[str | None, list[str]] = {}
-    for span_id, span in spans_by_id.items():
-        parent_id = span.get('parent_id')
-        if parent_id and parent_id not in spans_by_id:
-            parent_id = root_span_id if span_id != root_span_id else None
-        if span_id == root_span_id:
-            parent_id = None
-        span['parent_id'] = parent_id
-        children_by_parent.setdefault(parent_id, []).append(span_id)
-
-    def sort_key(span_id: str) -> tuple[int, str]:
-        start = spans_by_id[span_id].get('start_time_ns')
-        normalized_start = int(start) if isinstance(start, (int, float)) else 0
-        return (normalized_start, span_id)
-
-    for child_ids in children_by_parent.values():
-        child_ids.sort(key=sort_key)
-
-    root_span = spans_by_id[root_span_id]
     all_times = [
         int(value)
         for span in spans_by_id.values()
@@ -335,29 +316,30 @@ def _normalize_native_spans(spans: list[dict[str, Any]], *, root_span_id: str) -
         if isinstance(value, (int, float)) and int(value) > 0
     ]
     time_seed = min(all_times) if all_times else int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
-    span_counter = 0
 
-    def visit(span_id: str, inherited_start: int, inherited_end: int) -> tuple[int, int]:
-        nonlocal span_counter
-        span_counter += 1
+    ordered_ids: list[str] = []
+    if root_span_id in spans_by_id:
+        ordered_ids.append(root_span_id)
+    ordered_ids.extend(span_id for span_id in spans_by_id if span_id != root_span_id)
+
+    for index, span_id in enumerate(ordered_ids):
         span = spans_by_id[span_id]
+        parent_id = span.get('parent_id')
+        if span_id == root_span_id:
+            parent_id = None
+        elif parent_id and parent_id not in spans_by_id:
+            parent_id = root_span_id
+        elif parent_id in ('', None):
+            parent_id = root_span_id
+
         base_start = span.get('start_time_ns')
+        start_ns = int(base_start) if isinstance(base_start, (int, float)) and int(base_start) > 0 else time_seed + index
         base_end = span.get('end_time_ns')
-        start_ns = int(base_start) if isinstance(base_start, (int, float)) and int(base_start) > 0 else inherited_start + span_counter
-        end_ns = int(base_end) if isinstance(base_end, (int, float)) and int(base_end) > 0 else max(start_ns + 1, inherited_end)
+        end_ns = int(base_end) if isinstance(base_end, (int, float)) and int(base_end) > 0 else start_ns + 1
         if end_ns < start_ns:
             end_ns = start_ns + 1
 
-        child_start_cursor = start_ns
-        child_end_max = end_ns
-        for child_id in children_by_parent.get(span_id, []):
-            child_start, child_end = visit(child_id, child_start_cursor, max(child_start_cursor + 1, end_ns))
-            child_start_cursor = max(child_end + 1, child_start_cursor + 1)
-            child_end_max = max(child_end_max, child_end)
-
-        if child_end_max >= end_ns:
-            end_ns = child_end_max + 1
-
+        span['parent_id'] = parent_id
         span['start_time_ns'] = start_ns
         span['end_time_ns'] = end_ns
         span['name'] = str(span.get('name') or span_id)
@@ -367,18 +349,7 @@ def _normalize_native_spans(spans: list[dict[str, Any]], *, root_span_id: str) -
         span['outputs'] = _normalize_mlflow_value(span.get('outputs'))
         span['attributes'] = _normalize_mlflow_attributes(span.get('attributes') or {})
         span['events'] = _normalize_mlflow_events(span.get('events') or [], default_timestamp=start_ns)
-        return start_ns, end_ns
 
-    visit(root_span_id, int(root_span.get('start_time_ns') or time_seed), int(root_span.get('end_time_ns') or time_seed + max(len(spans_by_id), 1) + 1))
-
-    ordered_ids: list[str] = []
-
-    def collect(span_id: str) -> None:
-        ordered_ids.append(span_id)
-        for child_id in children_by_parent.get(span_id, []):
-            collect(child_id)
-
-    collect(root_span_id)
     return [spans_by_id[span_id] for span_id in ordered_ids]
 
 
