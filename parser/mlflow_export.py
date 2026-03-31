@@ -203,6 +203,8 @@ def _build_native_trace_payload(*, bundle: MlflowSessionBundle, bundle_name: str
             'copilot_trace.trace_type': str(trace.get('trace_type') or trace.get('type') or 'UNKNOWN'),
             'copilot_trace.function_name': str(trace.get('function_name') or trace.get('function') or ''),
             'copilot_trace.sequence': trace.get('sequence'),
+            'copilot_trace.parent_reason': trace.get('parent_reason'),
+            'copilot_trace.tool_call_id': trace.get('tool_call_id'),
             'copilot_trace.tags': trace.get('tags') or [],
             'copilot_trace.raw': trace,
         }
@@ -214,7 +216,7 @@ def _build_native_trace_payload(*, bundle: MlflowSessionBundle, bundle_name: str
                 'span_type': _trace_span_type(trace),
                 'start_time_ns': timestamp_ns,
                 'end_time_ns': timestamp_ns,
-                'status': 'OK',
+                'status': _trace_status(trace),
                 'inputs': _trace_inputs(trace),
                 'outputs': _trace_outputs(trace),
                 'attributes': {k: v for k, v in attributes.items() if v not in (None, '', [], {})},
@@ -222,13 +224,14 @@ def _build_native_trace_payload(*, bundle: MlflowSessionBundle, bundle_name: str
             }
         )
 
+    normalized_spans = _normalize_native_spans(spans, root_span_id=root_id)
     return {
         'format': 'copilot-trace.mlflow-native-trace',
-        'trace_version': 1,
+        'trace_version': 2,
         'session_id': session_id,
         'bundle_name': bundle_name,
         'root_span_id': root_id,
-        'spans': spans,
+        'spans': normalized_spans,
     }
 
 
@@ -245,7 +248,9 @@ def _trace_span_name(trace: dict[str, Any]) -> str:
 
 def _trace_span_type(trace: dict[str, Any]) -> str:
     trace_type = str(trace.get('trace_type') or trace.get('type') or '').upper()
-    if 'TOOL' in trace_type:
+    if trace_type == 'TOOL_CALL':
+        return 'TOOL'
+    if trace_type == 'TOOL_RESULT':
         return 'TOOL'
     if 'USER' in trace_type:
         return 'CHAT_MODEL'
@@ -254,8 +259,15 @@ def _trace_span_type(trace: dict[str, Any]) -> str:
     return 'CHAIN'
 
 
+def _trace_status(trace: dict[str, Any]) -> str:
+    status = str(trace.get('status') or '').strip().lower()
+    if status in {'error', 'failed', 'failure', 'cancelled', 'canceled'}:
+        return 'ERROR'
+    return 'OK'
+
+
 def _trace_inputs(trace: dict[str, Any]) -> Any:
-    for key in ('input', 'inputs', 'arguments', 'prompt', 'message', 'text'):
+    for key in ('input', 'inputs', 'arguments', 'args', 'prompt', 'message', 'text'):
         if key in trace and trace.get(key) not in (None, ''):
             return trace.get(key)
     return {
@@ -266,7 +278,7 @@ def _trace_inputs(trace: dict[str, Any]) -> Any:
 
 
 def _trace_outputs(trace: dict[str, Any]) -> Any:
-    for key in ('output', 'outputs', 'result', 'response', 'value', 'state'):
+    for key in ('output', 'outputs', 'result', 'response', 'value', 'result_preview', 'state'):
         if key in trace and trace.get(key) not in (None, ''):
             return trace.get(key)
     return None
@@ -287,6 +299,136 @@ def _trace_events(trace: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return events
+
+
+def _normalize_native_spans(spans: list[dict[str, Any]], *, root_span_id: str) -> list[dict[str, Any]]:
+    if not spans:
+        return []
+
+    spans_by_id = {str(span.get('id')): dict(span) for span in spans if span.get('id')}
+    if root_span_id not in spans_by_id:
+        raise MlflowExportError(f'Native trace root span is missing: {root_span_id}')
+
+    children_by_parent: dict[str | None, list[str]] = {}
+    for span_id, span in spans_by_id.items():
+        parent_id = span.get('parent_id')
+        if parent_id and parent_id not in spans_by_id:
+            parent_id = root_span_id if span_id != root_span_id else None
+        if span_id == root_span_id:
+            parent_id = None
+        span['parent_id'] = parent_id
+        children_by_parent.setdefault(parent_id, []).append(span_id)
+
+    def sort_key(span_id: str) -> tuple[int, str]:
+        start = spans_by_id[span_id].get('start_time_ns')
+        normalized_start = int(start) if isinstance(start, (int, float)) else 0
+        return (normalized_start, span_id)
+
+    for child_ids in children_by_parent.values():
+        child_ids.sort(key=sort_key)
+
+    root_span = spans_by_id[root_span_id]
+    all_times = [
+        int(value)
+        for span in spans_by_id.values()
+        for value in (span.get('start_time_ns'), span.get('end_time_ns'))
+        if isinstance(value, (int, float)) and int(value) > 0
+    ]
+    time_seed = min(all_times) if all_times else int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    span_counter = 0
+
+    def visit(span_id: str, inherited_start: int, inherited_end: int) -> tuple[int, int]:
+        nonlocal span_counter
+        span_counter += 1
+        span = spans_by_id[span_id]
+        base_start = span.get('start_time_ns')
+        base_end = span.get('end_time_ns')
+        start_ns = int(base_start) if isinstance(base_start, (int, float)) and int(base_start) > 0 else inherited_start + span_counter
+        end_ns = int(base_end) if isinstance(base_end, (int, float)) and int(base_end) > 0 else max(start_ns + 1, inherited_end)
+        if end_ns < start_ns:
+            end_ns = start_ns + 1
+
+        child_start_cursor = start_ns
+        child_end_max = end_ns
+        for child_id in children_by_parent.get(span_id, []):
+            child_start, child_end = visit(child_id, child_start_cursor, max(child_start_cursor + 1, end_ns))
+            child_start_cursor = max(child_end + 1, child_start_cursor + 1)
+            child_end_max = max(child_end_max, child_end)
+
+        if child_end_max >= end_ns:
+            end_ns = child_end_max + 1
+
+        span['start_time_ns'] = start_ns
+        span['end_time_ns'] = end_ns
+        span['name'] = str(span.get('name') or span_id)
+        span['span_type'] = str(span.get('span_type') or 'CHAIN')
+        span['status'] = str(span.get('status') or 'OK')
+        span['inputs'] = _normalize_mlflow_value(span.get('inputs'))
+        span['outputs'] = _normalize_mlflow_value(span.get('outputs'))
+        span['attributes'] = _normalize_mlflow_attributes(span.get('attributes') or {})
+        span['events'] = _normalize_mlflow_events(span.get('events') or [], default_timestamp=start_ns)
+        return start_ns, end_ns
+
+    visit(root_span_id, int(root_span.get('start_time_ns') or time_seed), int(root_span.get('end_time_ns') or time_seed + max(len(spans_by_id), 1) + 1))
+
+    ordered_ids: list[str] = []
+
+    def collect(span_id: str) -> None:
+        ordered_ids.append(span_id)
+        for child_id in children_by_parent.get(span_id, []):
+            collect(child_id)
+
+    collect(root_span_id)
+    return [spans_by_id[span_id] for span_id in ordered_ids]
+
+
+def _normalize_mlflow_events(events: list[dict[str, Any]], *, default_timestamp: int) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+        timestamp = event.get('timestamp_unix_nano')
+        if not isinstance(timestamp, (int, float)) or int(timestamp) <= 0:
+            timestamp = default_timestamp + index
+        normalized.append(
+            {
+                'name': str(event.get('name') or f'event-{index + 1}'),
+                'timestamp_unix_nano': int(timestamp),
+                'attributes': _normalize_mlflow_attributes(event.get('attributes') or {}),
+            }
+        )
+    return normalized
+
+
+def _normalize_mlflow_attributes(value: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        if item is None:
+            continue
+        normalized[str(key)] = _normalize_mlflow_attribute_value(item)
+    return normalized
+
+
+def _normalize_mlflow_attribute_value(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return json.dumps(_json_safe(value), ensure_ascii=False, sort_keys=True)
+
+
+def _normalize_mlflow_value(value: Any) -> Any:
+    if value is None:
+        return None
+    return _json_safe(value)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
 
 
 def _to_unix_nanos(value: Any) -> int | None:

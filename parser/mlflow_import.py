@@ -247,7 +247,7 @@ def _extract_run_id(active_run: Any) -> str:
 
 
 def _import_native_trace_payload(*, bundle: MlflowImportBundle, mlflow: Any, run_id: str) -> dict[str, Any]:
-    payload = bundle.trace_payload
+    payload = _normalize_native_trace_payload(bundle.trace_payload)
     spans_payload = payload.get('spans') or []
     if not spans_payload:
         return {'imported': False, 'span_count': 0, 'reason': 'no_spans_in_bundle'}
@@ -314,9 +314,84 @@ def _import_native_trace_payload(*, bundle: MlflowImportBundle, mlflow: Any, run
     }
 
 
+def _normalize_native_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    spans = payload.get('spans') or []
+    normalized_spans: list[dict[str, Any]] = []
+    fallback_ts = 1
+    for index, span in enumerate(spans):
+        if not isinstance(span, dict) or not span.get('id'):
+            continue
+        start_time_ns = span.get('start_time_ns')
+        end_time_ns = span.get('end_time_ns')
+        if not isinstance(start_time_ns, (int, float)) or int(start_time_ns) <= 0:
+            start_time_ns = fallback_ts + index
+        if not isinstance(end_time_ns, (int, float)) or int(end_time_ns) < int(start_time_ns):
+            end_time_ns = int(start_time_ns) + 1
+        normalized_spans.append(
+            {
+                'id': str(span.get('id')),
+                'parent_id': str(span.get('parent_id')) if span.get('parent_id') not in (None, '') else None,
+                'name': str(span.get('name') or span.get('id') or f'span-{index + 1}'),
+                'span_type': str(span.get('span_type') or 'CHAIN'),
+                'status': str(span.get('status') or 'OK'),
+                'start_time_ns': int(start_time_ns),
+                'end_time_ns': int(end_time_ns),
+                'inputs': _json_safe(span.get('inputs')),
+                'outputs': _json_safe(span.get('outputs')),
+                'attributes': _normalize_attributes(span.get('attributes') or {}),
+                'events': _normalize_events(span.get('events') or [], default_timestamp=int(start_time_ns)),
+            }
+        )
+    return {
+        **payload,
+        'root_span_id': str(payload.get('root_span_id') or ''),
+        'spans': normalized_spans,
+    }
+
+
+def _normalize_events(events: list[dict[str, Any]], *, default_timestamp: int) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+        timestamp = event.get('timestamp_unix_nano')
+        if not isinstance(timestamp, (int, float)) or int(timestamp) <= 0:
+            timestamp = default_timestamp + index
+        normalized.append(
+            {
+                'name': str(event.get('name') or f'event-{index + 1}'),
+                'timestamp_unix_nano': int(timestamp),
+                'attributes': _normalize_attributes(event.get('attributes') or {}),
+            }
+        )
+    return normalized
+
+
+def _normalize_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in attributes.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            normalized[str(key)] = value
+        else:
+            normalized[str(key)] = json.dumps(_json_safe(value), ensure_ascii=False, sort_keys=True)
+    return normalized
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
 def _add_event(*, mlflow: Any, live_span: Any, event_payload: dict[str, Any]) -> None:
     event_name = str(event_payload.get('name') or 'event')
-    attributes = event_payload.get('attributes') or {}
+    attributes = _normalize_attributes(event_payload.get('attributes') or {})
     timestamp = event_payload.get('timestamp_unix_nano')
 
     span_event_cls = getattr(mlflow, 'SpanEvent', None)

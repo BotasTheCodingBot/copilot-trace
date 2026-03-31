@@ -351,6 +351,9 @@ class _FakeSpan:
         self.end_calls: list[dict[str, object]] = []
 
     def add_event(self, event) -> None:
+        for value in getattr(event, 'attributes', {}).values():
+            if not isinstance(value, (str, int, float, bool)):
+                raise AssertionError(f'event attribute must be scalar, got {type(value).__name__}: {value!r}')
         self.events.append(event)
 
     def end(self, outputs=None, status=None, end_time_ns=None) -> None:
@@ -382,6 +385,8 @@ class _FakeMlflow:
         return _FakeRun('run-123')
 
     def start_span_no_context(self, name: str, span_type: str = 'CHAIN', parent_span=None, inputs=None, attributes=None, start_time_ns=None):
+        for value in (attributes or {}).values():
+            self._assert_mlflow_attr_value(value)
         span = _FakeSpan(
             name=name,
             span_type=span_type,
@@ -393,6 +398,10 @@ class _FakeMlflow:
         )
         self.created_spans.append(span)
         return span
+
+    def _assert_mlflow_attr_value(self, value):
+        if not isinstance(value, (str, int, float, bool)):
+            raise AssertionError(f'attribute must be scalar, got {type(value).__name__}: {value!r}')
 
     def set_tags(self, tags: dict[str, str]) -> None:
         self.tags = tags
@@ -417,11 +426,42 @@ class MlflowImportTests(unittest.TestCase):
                 'session_id': 'session-123',
                 'first_timestamp': '2026-03-31T10:00:00Z',
                 'last_timestamp': '2026-03-31T10:05:00Z',
-                'annotated_count': 2,
+                'annotated_count': 3,
             },
             traces=[
-                {'id': 'trace-1', 'session_id': 'session-123', 'text': 'Hello'},
-                {'id': 'trace-2', 'session_id': 'session-123', 'function_name': 'tool.run'},
+                {
+                    'id': 'trace-1',
+                    'session_id': 'session-123',
+                    'timestamp': '2026-03-31T10:00:00Z',
+                    'trace_type': 'ASSISTANT_MESSAGE',
+                    'function_name': 'assistant_message',
+                    'text': 'Hello',
+                    'notes': 'assistant replied',
+                    'evaluations': [{'id': 'eval-inline', 'score': 0.8, 'notes': ['good', 'concise']}],
+                },
+                {
+                    'id': 'trace-2',
+                    'session_id': 'session-123',
+                    'timestamp': '2026-03-31T10:00:00Z',
+                    'trace_type': 'TOOL_CALL',
+                    'function_name': 'tool.run',
+                    'tool_call_id': 'call-123',
+                    'parent_trace_id': 'trace-1',
+                    'parent_reason': 'message',
+                    'args': {'query': 'hello'},
+                    'raw': {'nested': ['x', 1]},
+                },
+                {
+                    'id': 'trace-3',
+                    'session_id': 'session-123',
+                    'timestamp': '2026-03-31T10:00:00Z',
+                    'trace_type': 'TOOL_RESULT',
+                    'function_name': 'tool.run',
+                    'tool_call_id': 'call-123',
+                    'parent_trace_id': 'trace-2',
+                    'parent_reason': 'tool_call',
+                    'result': {'ok': True, 'items': [1, 2, 3]},
+                },
             ],
             evaluations=[
                 {'id': 'eval-1', 'session_id': 'session-123', 'score': 0.8, 'status': 'ok'},
@@ -444,11 +484,28 @@ class MlflowImportTests(unittest.TestCase):
             bundle = load_bundle(bundle_dir)
             self.assertEqual(bundle.manifest['format'], 'copilot-trace.mlflow-bundle')
             self.assertEqual(bundle.session['session_id'], 'session-123')
-            self.assertEqual(bundle.traces_payload['count'], 2)
+            self.assertEqual(bundle.traces_payload['count'], 3)
             self.assertEqual(bundle.evaluations_payload['count'], 1)
             self.assertEqual(bundle.run_payload['run_name'], 'bundle-under-test')
             self.assertEqual(bundle.trace_payload['format'], 'copilot-trace.mlflow-native-trace')
-            self.assertGreaterEqual(len(bundle.trace_payload['spans']), 3)
+            self.assertEqual(bundle.trace_payload['trace_version'], 2)
+            self.assertEqual(len(bundle.trace_payload['spans']), 4)
+
+    def test_export_normalizes_native_trace_payload_for_nested_tool_spans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = self._write_bundle(Path(tmp))
+            trace_payload = json.loads((bundle_dir / 'mlflow-trace.json').read_text(encoding='utf-8'))
+            spans_by_id = {span['id']: span for span in trace_payload['spans']}
+
+            self.assertEqual(trace_payload['trace_version'], 2)
+            self.assertEqual(trace_payload['root_span_id'], 'session:session-123')
+            self.assertEqual(spans_by_id['trace-2']['parent_id'], 'trace-1')
+            self.assertEqual(spans_by_id['trace-3']['parent_id'], 'trace-2')
+            self.assertGreater(spans_by_id['trace-2']['end_time_ns'], spans_by_id['trace-2']['start_time_ns'])
+            self.assertGreaterEqual(spans_by_id['trace-3']['start_time_ns'], spans_by_id['trace-2']['start_time_ns'])
+            self.assertLessEqual(spans_by_id['trace-3']['end_time_ns'], spans_by_id['trace-2']['end_time_ns'])
+            self.assertIsInstance(spans_by_id['trace-2']['attributes']['copilot_trace.raw'], str)
+            self.assertIsInstance(spans_by_id['trace-1']['events'][0]['attributes']['notes'], str)
 
     def test_import_bundle_logs_run_metadata_and_artifacts(self):
         fake_mlflow = _FakeMlflow()
@@ -474,11 +531,19 @@ class MlflowImportTests(unittest.TestCase):
             self.assertEqual(fake_mlflow.tags['env'], 'test')
             self.assertEqual(fake_mlflow.tags['copilot_trace.bundle_format'], 'copilot-trace.mlflow-bundle')
             self.assertTrue(result['mlflow_trace']['imported'])
-            self.assertEqual(result['mlflow_trace']['span_count'], 3)
+            self.assertEqual(result['mlflow_trace']['span_count'], 4)
             self.assertEqual(fake_mlflow.tags['copilot_trace.imported_trace_id'], 'trace-native-1')
-            self.assertEqual(len(fake_mlflow.created_spans), 3)
+            self.assertEqual(len(fake_mlflow.created_spans), 4)
             self.assertIsNone(fake_mlflow.created_spans[0].parent_span)
             self.assertIs(fake_mlflow.created_spans[1].parent_span, fake_mlflow.created_spans[0])
+            self.assertIs(fake_mlflow.created_spans[2].parent_span, fake_mlflow.created_spans[1])
+            self.assertIs(fake_mlflow.created_spans[3].parent_span, fake_mlflow.created_spans[2])
+            self.assertTrue(all(span.end_calls[0]['end_time_ns'] >= span.start_time_ns for span in fake_mlflow.created_spans))
+            self.assertEqual(fake_mlflow.created_spans[2].inputs, {'query': 'hello'})
+            self.assertEqual(fake_mlflow.created_spans[3].end_calls[0]['outputs'], {'ok': True, 'items': [1, 2, 3]})
+            self.assertIsInstance(fake_mlflow.created_spans[2].attributes['copilot_trace.raw'], str)
+            self.assertEqual(fake_mlflow.created_spans[1].events[0].name, 'copilot.notes')
+            self.assertIsInstance(fake_mlflow.created_spans[1].events[0].attributes['notes'], str)
             self.assertEqual(fake_mlflow.ended_status, 'FINISHED')
 
     def test_load_bundle_rejects_unknown_manifest_format(self):
