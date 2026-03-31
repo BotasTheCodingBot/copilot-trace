@@ -111,7 +111,7 @@ cd ui
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-Open <http://localhost:5173/#/parser>. The Parser page keeps the paged timeline front and center, with the selected trace docked beside it so payload and evaluation context stay visible while you move through the session. Session rows in the left sidebar also expose an **Export session** action that writes an MLflow-oriented JSON bundle to a local folder you choose.
+Open <http://localhost:5173/#/parser>. The Parser page keeps the paged timeline front and center, with the selected trace docked beside it so payload and evaluation context stay visible while you move through the session. The trace timeline header also exposes an **Export session** action for the currently selected session, writing an MLflow-oriented JSON bundle to a local folder you choose.
 
 ## UI routes
 The UI uses hash routes so you can deep-link without needing server-side rewrite rules:

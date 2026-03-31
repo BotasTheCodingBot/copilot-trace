@@ -14,7 +14,7 @@ const trace: Trace = {
 }
 
 describe('ParserPage', () => {
-  it('renders the timeline and selected trace details without trace export controls', () => {
+  it('renders the timeline, selected trace details, and session export control in the timeline header', () => {
     const html = ReactDOMServer.renderToString(
       <ParserPage
         availableTags={['copilot']}
@@ -23,6 +23,7 @@ describe('ParserPage', () => {
         evaluationByTraceId={new Map()}
         overview={{ ASSISTANT_MESSAGE: 1 }}
         search=""
+        onOpenExportDialog={() => {}}
         selectedSession="session-1"
         selectedTag="all"
         selectedTrace={trace}
@@ -44,6 +45,7 @@ describe('ParserPage', () => {
     expect(html).toContain('Trace timeline')
     expect(html).toContain('Selected trace')
     expect(html).toContain('Trace payload')
+    expect(html).toContain('Export session')
     expect(html).not.toContain('Export to MLflow')
   })
 })

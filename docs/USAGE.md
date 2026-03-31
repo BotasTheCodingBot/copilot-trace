@@ -43,7 +43,7 @@
 
 5. **Annotate & explore**
    - Use the Parser page to search traces, switch timeline sort order, and inspect the selected trace beside the session stream.
-   - Use **Export session** on any session row in the selector to write a local MLflow-oriented bundle (`manifest.json`, `session.json`, `traces.json`, `evaluations.json`, `mlflow-run.json`) to a folder on disk.
+   - Use **Export session** in the trace timeline header to write the currently selected session as a local MLflow-oriented bundle (`manifest.json`, `session.json`, `traces.json`, `evaluations.json`, `mlflow-run.json`) to a folder on disk.
    - The selected trace panel keeps payload and evaluation context visible while you move through paged results.
    - The Evaluation page surfaces heuristic scores per session/trace plus explicit status explanations, score bands, and sortable history.
    - Dashboard shows aggregated metrics and low-score triage.

@@ -139,7 +139,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [sourceLabel, setSourceLabel] = useState('live API')
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
-  const [exportSessionId, setExportSessionId] = useState('')
   const [exportOutputDir, setExportOutputDir] = useState('')
   const [exportBundleName, setExportBundleName] = useState('')
   const [exportTagText, setExportTagText] = useState('')
@@ -355,15 +354,20 @@ export default function App() {
   const selectedEvaluation = selectedTrace ? evaluationByTraceId.get(selectedTrace.id) : undefined
   const parsedExportTags = useMemo(() => parseBundleTags(exportTagText), [exportTagText])
   const nativeDirectoryPickerSupported = useMemo(() => supportsNativeDirectoryPicker(), [])
+  const activeExportSessionId = exportDialogOpen ? selectedSession.trim() : ''
+
+  useEffect(() => {
+    if (!exportDialogOpen) return
+    setExportBundleName((current) => current.trim() ? current : selectedSession)
+  }, [exportDialogOpen, selectedSession])
 
   const handleExportOutputDirChange = (event: ChangeEvent<HTMLInputElement>) => {
     setExportOutputDir(event.target.value)
     setExportPickerMessage(null)
   }
 
-  const handleOpenExportDialog = (sessionId: string) => {
-    setExportSessionId(sessionId)
-    setExportBundleName(sessionId)
+  const handleOpenExportDialog = () => {
+    setExportBundleName(selectedSession)
     setExportSelectedFolderLabel('')
     setExportPickerMessage(null)
     setExportError(null)
@@ -397,7 +401,7 @@ export default function App() {
   }
 
   const handleSubmitExport = async () => {
-    const normalizedSessionId = exportSessionId.trim()
+    const normalizedSessionId = activeExportSessionId
     const normalizedOutputDir = exportOutputDir.trim()
     const normalizedBundleName = exportBundleName.trim() || normalizedSessionId
     if (!normalizedSessionId) {
@@ -516,6 +520,7 @@ export default function App() {
             evaluationByTraceId={evaluationByTraceId}
             overview={overview}
             search={search}
+            onOpenExportDialog={handleOpenExportDialog}
             selectedEvaluation={selectedEvaluation}
             selectedSession={selectedSession}
             selectedTag={selectedTag}
@@ -640,11 +645,6 @@ export default function App() {
                               secondary={`${session.trace_count} traces · ${session.annotated_count ?? 0} annotated${sessionEval ? ` · avg ${pct(sessionEval.average_score)}` : ''}`}
                             />
                           </ListItemButton>
-                          <Box sx={{ px: 1.5, pb: 1.25, pt: 0 }}>
-                            <Button size="small" variant="outlined" onClick={() => handleOpenExportDialog(session.session_id)}>
-                              Export session
-                            </Button>
-                          </Box>
                         </Paper>
                       </Box>
                     )
@@ -678,7 +678,7 @@ export default function App() {
             <Typography variant="body2" color="text.secondary">
               Write the whole selected session to a local MLflow-oriented bundle. This stays on disk only — no tracking server calls.
             </Typography>
-            <TextField label="Session id" value={exportSessionId} disabled fullWidth />
+            <TextField label="Session id" value={activeExportSessionId} disabled fullWidth />
             <Stack spacing={1.25}>
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25} alignItems={{ sm: 'flex-start' }}>
                 <TextField
@@ -734,7 +734,7 @@ export default function App() {
         </DialogContent>
         <DialogActions>
           <Button onClick={handleCloseExportDialog} disabled={exportLoading}>Cancel</Button>
-          <Button onClick={handleSubmitExport} variant="contained" disabled={exportLoading || !exportSessionId.trim()}>
+          <Button onClick={handleSubmitExport} variant="contained" disabled={exportLoading || !activeExportSessionId}>
             {exportLoading ? 'Exporting…' : 'Export session'}
           </Button>
         </DialogActions>

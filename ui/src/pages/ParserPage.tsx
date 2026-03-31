@@ -27,6 +27,7 @@ interface ParserPageProps {
   overview: Record<string, number>
   search: string
   selectedEvaluation?: Evaluation
+  onOpenExportDialog: () => void
   selectedSession: string
   selectedTag: string
   selectedTrace: Trace | null
@@ -67,6 +68,7 @@ export default function ParserPage({
   evaluationByTraceId,
   overview,
   search,
+  onOpenExportDialog,
   selectedEvaluation,
   selectedSession,
   selectedTag,
@@ -125,6 +127,17 @@ export default function ParserPage({
       <Stack direction={{ xs: 'column', xl: 'row' }} spacing={3} alignItems="stretch">
         <Box sx={{ flex: 1.15, minWidth: 0 }}>
           <SectionCard title="Trace timeline" description={`${traces.length} traces on this page · ${tracesTotal} matching the current query.`}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" spacing={1.5} alignItems={{ sm: 'center' }}>
+              <Box>
+                <Typography variant="subtitle2" fontWeight={700}>Selected session actions</Typography>
+                <Typography variant="body2" sx={{ color: 'rgba(228,235,255,0.62)' }}>
+                  Export the currently selected session as an MLflow-oriented bundle.
+                </Typography>
+              </Box>
+              <Button variant="outlined" onClick={onOpenExportDialog} disabled={!selectedSession.trim()}>
+                Export session
+              </Button>
+            </Stack>
             <List sx={{ maxHeight: 820, overflow: 'auto', py: 0 }}>
               {traces.map((trace) => {
                 const traceEval = evaluationByTraceId.get(trace.id)
